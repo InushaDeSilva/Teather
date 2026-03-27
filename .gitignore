@@ -17,6 +17,9 @@ dist/
 *.swp
 *.swo
 
+# MSIX build output (regenerate with `cargo winapp pack` in src-tauri)
+/packaging/*.msix
+
 # OS
 Thumbs.db
 desktop.ini

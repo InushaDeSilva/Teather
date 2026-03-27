@@ -145,4 +145,107 @@ impl CloudProvider for ApsCloudProvider {
         );
         Ok(())
     }
+
+    fn delete_cloud_item(&self, cloud_item_id: &str, item_display_name: &str) -> Result<()> {
+        let token = self
+            .auth
+            .get_access_token()
+            .context("Failed to get access token for delete")?;
+        self.runtime.block_on(
+            self.data_mgmt.delete_item_as_deleted_version(
+                &token,
+                &self.project_id,
+                cloud_item_id,
+                item_display_name,
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn delete_cloud_folder_recursive(&self, cloud_folder_id: &str) -> Result<()> {
+        let token = self
+            .auth
+            .get_access_token()
+            .context("Failed to get access token for folder delete")?;
+        let project_id = self.project_id.clone();
+        let dm = self.data_mgmt.clone();
+        self.runtime
+            .block_on(delete_folder_recursive(&dm, &token, &project_id, cloud_folder_id))
+    }
+
+    fn rename_cloud_item(&self, cloud_item_id: &str, new_name: &str) -> Result<()> {
+        let token = self
+            .auth
+            .get_access_token()
+            .context("Failed to get access token for rename")?;
+        let versions = self.runtime.block_on(
+            self.data_mgmt
+                .get_item_versions(&token, &self.project_id, cloud_item_id),
+        )?;
+        let vid = versions
+            .first()
+            .map(|v| v.id.as_str())
+            .context("No versions for item rename")?;
+        self.runtime.block_on(self.data_mgmt.patch_version_name(
+            &token,
+            &self.project_id,
+            vid,
+            new_name,
+        ))?;
+        Ok(())
+    }
+
+    fn rename_cloud_folder(&self, cloud_folder_id: &str, new_name: &str) -> Result<()> {
+        let token = self
+            .auth
+            .get_access_token()
+            .context("Failed to get access token for folder rename")?;
+        self.runtime.block_on(self.data_mgmt.patch_folder_display_name(
+            &token,
+            &self.project_id,
+            cloud_folder_id,
+            new_name,
+        ))?;
+        Ok(())
+    }
+
+    fn rename_folder_mapping(&self, old_relative: &Path, new_relative: &Path) -> Result<()> {
+        let mut map = self.folder_map.lock().unwrap();
+        if let Some(id) = map.remove(&old_relative.to_path_buf()) {
+            map.insert(new_relative.to_path_buf(), id);
+            tracing::debug!(
+                "Renamed folder mapping {:?} → {:?}",
+                old_relative,
+                new_relative
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Recursively delete folder contents (files as Deleted versions; nested folders first).
+async fn delete_folder_recursive(
+    data_mgmt: &ApsDataManagementClient,
+    token: &str,
+    project_id: &str,
+    folder_id: &str,
+) -> Result<()> {
+    let contents = data_mgmt
+        .get_folder_contents(token, project_id, folder_id)
+        .await?;
+    for item in contents {
+        if item.item_type == "folders" {
+            Box::pin(delete_folder_recursive(data_mgmt, token, project_id, &item.id)).await?;
+        } else if item.item_type == "items" {
+            data_mgmt
+                .delete_item_as_deleted_version(
+                    token,
+                    project_id,
+                    &item.id,
+                    &item.attributes.display_name,
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }

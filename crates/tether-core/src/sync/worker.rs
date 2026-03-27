@@ -6,8 +6,10 @@ use crate::api::auth::ApsAuthClient;
 use crate::api::storage::ApsStorageClient;
 use crate::api::data_management::ApsDataManagementClient;
 use crate::db::database::SyncDatabase;
+use crate::sync::conflict::{self, ConflictStrategy};
+use crate::sync::hasher;
 use crate::sync::queue::SyncQueue;
-use crate::sync::task::{SyncOperation, SyncTask, SyncTaskStatus};
+use crate::sync::task::{SyncOperation, SyncTask};
 
 pub async fn start_workers(
     num_workers: usize,
@@ -73,7 +75,7 @@ async fn process_task(
     token: &str,
     storage: &ApsStorageClient,
     data_mgmt: &ApsDataManagementClient,
-    db: &Arc<Mutex<SyncDatabase>>,
+    _db: &Arc<Mutex<SyncDatabase>>,
     project_id: &str,
 ) -> anyhow::Result<()> {
     match &task.operation {
@@ -90,7 +92,13 @@ async fn process_task(
                 };
 
                 let active_version = versions.first().ok_or_else(|| anyhow::anyhow!("No versions found for item {}", item_id))?;
-                
+
+                let cloud_modified = active_version
+                    .attributes
+                    .last_modified_time
+                    .as_deref()
+                    .and_then(parse_cloud_time);
+
                 // 2. Extract storage urn
                 let storage_urn = active_version
                     .relationships
@@ -124,13 +132,36 @@ async fn process_task(
                     }
                 }
 
-                // 5. Trigger download via S3
+                // 5. Download bytes, resolve conflicts, write, hash
                 info!("Downloading {} to {}", object_key, task.local_path.display());
-                storage.download_file(token, bucket_key, &object_key, &task.local_path).await?;
-                
+                let data = storage
+                    .download_to_bytes(token, bucket_key, &object_key)
+                    .await?;
+
+                let local_newer = match (task.local_path.exists(), cloud_modified) {
+                    (true, Some(cloud_t)) => std::fs::metadata(&task.local_path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|lm| lm > cloud_t)
+                        .unwrap_or(false),
+                    _ => false,
+                };
+
+                if local_newer {
+                    conflict::resolve_conflict(
+                        &task.local_path,
+                        &data,
+                        ConflictStrategy::KeepBoth,
+                    )
+                    .await?;
+                } else {
+                    tokio::fs::write(&task.local_path, &data).await?;
+                }
+
+                let hash = hasher::hash_file(&task.local_path).await?;
+                debug!("SHA-256 after download: {} ({})", hash, task.local_path.display());
+
                 info!("Finished downloading item {}", item_id);
-                
-                // TODO: Register in SQLite database to track sync state
             }
         }
         SyncOperation::CreateFolder => {
@@ -144,4 +175,16 @@ async fn process_task(
         }
     }
     Ok(())
+}
+
+/// Parse APS ISO-8601 timestamps into [`std::time::SystemTime`].
+fn parse_cloud_time(s: &str) -> Option<std::time::SystemTime> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.into())
+        .ok()
+        .or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(&format!("{s}Z"))
+                .map(|dt| dt.into())
+                .ok()
+        })
 }

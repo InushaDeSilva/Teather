@@ -46,4 +46,23 @@ pub trait CloudProvider: Send + Sync {
         relative_path: &Path,
         cloud_folder_id: &str,
     ) -> anyhow::Result<()>;
+
+    /// Delete a cloud file (item) — posts a Deleted version.
+    fn delete_cloud_item(&self, cloud_item_id: &str, item_display_name: &str) -> anyhow::Result<()>;
+
+    /// Recursively delete all files (and nested folders) under a cloud folder.
+    fn delete_cloud_folder_recursive(&self, cloud_folder_id: &str) -> anyhow::Result<()>;
+
+    /// Rename a file item (latest version name).
+    fn rename_cloud_item(&self, cloud_item_id: &str, new_name: &str) -> anyhow::Result<()>;
+
+    /// Rename a folder (display name).
+    fn rename_cloud_folder(&self, cloud_folder_id: &str, new_name: &str) -> anyhow::Result<()>;
+
+    /// Update local relative path → folder id map after Explorer renames a folder.
+    fn rename_folder_mapping(
+        &self,
+        old_relative: &Path,
+        new_relative: &Path,
+    ) -> anyhow::Result<()>;
 }

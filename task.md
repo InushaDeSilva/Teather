@@ -42,9 +42,9 @@
 - [x] `task.rs` — SyncTask, SyncOperation, SyncPriority, SyncTaskStatus
 - [x] `change_detector.rs` — `notify` crate + `notify-debouncer-full` (3s debounce, exclusion rules)
 - [x] `cloud_poller.rs` — periodic polling (30s) via `tokio::time::interval`
-- [x] `worker.rs` — S3 download background loops
-- [ ] `conflict.rs` — last-write-wins with safety copy
-- [ ] `hasher.rs` — SHA-256 via `sha2` crate
+- [x] `worker.rs` — S3 download background loops (downloads, conflict check vs cloud `lastModifiedTime`, `KeepBoth` safety copy, post-write hash)
+- [x] `conflict.rs` — last-write-wins with safety copy (wired in download path)
+- [x] `hasher.rs` — SHA-256 via `sha2` crate (wired after successful writes)
 
 ### Configuration (`crates/tether-core/src/config/`)
 - [x] `settings.rs` — settings model (AppSettings, load from defaults)
@@ -89,12 +89,12 @@
 - [x] Windows CFAPI Integration (`tether-cfapi` crate)
   - [x] Native Sync Root Registration (`registry.rs`)
   - [x] Wire up `cloud-filter` Session
-- [/] CFAPI Callbacks
-  - [ ] `fetch_placeholders` — sync directory tree
-  - [ ] `fetch_data` — hydrate files on-demand
-  - [ ] `notify_delete` / `notify_rename` — propagate local changes
-- [ ] Placeholder creation, status overlays
-- [ ] MSIX packaging via `winapp` CLI
+- [x] CFAPI Callbacks (`tether-cfapi` / `filter.rs`)
+  - [x] `fetch_placeholders` — sync directory tree
+  - [x] `fetch_data` — hydrate files on-demand
+  - [x] `delete` / `rename` — propagate local delete/rename to APS (Data Management)
+- [x] Placeholder creation, status overlays — driven by `mark_in_sync` / `ticket.report_progress` in filter callbacks
+- [x] MSIX packaging via `winapp` CLI — `src-tauri/appxmanifest.xml`, `packaging/Package.appxmanifest`, `packaging/README.md` (see README for `cargo winapp pack`)
 
 ## Phase 3: Polish (Future)
 - [ ] Selective sync, bandwidth throttling, conflict UI

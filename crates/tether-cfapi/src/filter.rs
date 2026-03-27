@@ -190,4 +190,111 @@ impl SyncFilter for TetherSyncFilter {
 
         Ok(())
     }
+
+    /// User deleted a placeholder — propagate to cloud, then acknowledge.
+    fn delete(
+        &self,
+        request: Request,
+        ticket: ticket::Delete,
+        info: info::Delete,
+    ) -> Result<(), CloudErrorKind> {
+        if info.is_undelete() {
+            return ticket.pass().map_err(|e| {
+                tracing::error!("ticket.pass delete (undelete): {:?}", e);
+                CloudErrorKind::InvalidRequest
+            });
+        }
+
+        let blob = request.file_blob();
+        let cloud_id = std::str::from_utf8(blob).unwrap_or("").trim();
+        if cloud_id.is_empty() {
+            tracing::error!("delete: empty file identity blob");
+            return Err(CloudErrorKind::InvalidRequest);
+        }
+
+        let path = request.path();
+        let display_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
+        if info.is_directory() {
+            self.provider
+                .delete_cloud_folder_recursive(cloud_id)
+                .map_err(|e| {
+                    tracing::error!("delete_cloud_folder_recursive: {}", e);
+                    CloudErrorKind::NetworkUnavailable
+                })?;
+        } else {
+            self.provider
+                .delete_cloud_item(cloud_id, display_name)
+                .map_err(|e| {
+                    tracing::error!("delete_cloud_item: {}", e);
+                    CloudErrorKind::NetworkUnavailable
+                })?;
+        }
+
+        ticket.pass().map_err(|e| {
+            tracing::error!("ticket.pass delete: {:?}", e);
+            CloudErrorKind::InvalidRequest
+        })
+    }
+
+    /// User renamed/moved a placeholder — propagate to cloud, then acknowledge.
+    fn rename(
+        &self,
+        request: Request,
+        ticket: ticket::Rename,
+        info: info::Rename,
+    ) -> Result<(), CloudErrorKind> {
+        let blob = request.file_blob();
+        let cloud_id = std::str::from_utf8(blob).unwrap_or("").trim();
+        if cloud_id.is_empty() {
+            tracing::error!("rename: empty file identity blob");
+            return Err(CloudErrorKind::InvalidRequest);
+        }
+
+        let target = info.target_path();
+        let new_name = target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or(CloudErrorKind::InvalidRequest)?;
+
+        let source_path = request.path();
+        let relative_old = source_path
+            .strip_prefix(&self.root_path)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::new());
+        let relative_new = target
+            .strip_prefix(&self.root_path)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::new());
+
+        if info.is_directory() {
+            self.provider
+                .rename_cloud_folder(cloud_id, new_name)
+                .map_err(|e| {
+                    tracing::error!("rename_cloud_folder: {}", e);
+                    CloudErrorKind::NetworkUnavailable
+                })?;
+            self.provider
+                .rename_folder_mapping(&relative_old, &relative_new)
+                .map_err(|e| {
+                    tracing::error!("rename_folder_mapping: {}", e);
+                    CloudErrorKind::NetworkUnavailable
+                })?;
+        } else {
+            self.provider
+                .rename_cloud_item(cloud_id, new_name)
+                .map_err(|e| {
+                    tracing::error!("rename_cloud_item: {}", e);
+                    CloudErrorKind::NetworkUnavailable
+                })?;
+        }
+
+        ticket.pass().map_err(|e| {
+            tracing::error!("ticket.pass rename: {:?}", e);
+            CloudErrorKind::InvalidRequest
+        })
+    }
 }
