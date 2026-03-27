@@ -61,6 +61,7 @@ pub fn register_sync_root(
     // Configure the Sync Root virtual drive properties
     let info = SyncRootInfo::default()
         .with_display_name(provider_name)
+        .with_icon("%SystemRoot%\\system32\\imageres.dll,197")
         .with_path(sync_root_path)?
         .with_version(provider_version)
         // Partial Hydration = Files start as 0-byte placeholders and populate on-demand

@@ -47,7 +47,16 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusRes
 pub async fn check_auth_status(state: State<'_, AppState>) -> Result<bool, String> {
     let engine = state.engine.lock().await;
     match engine.auth.get_access_token() {
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            // Token exists — proactively refresh it so it's always fresh on startup
+            match engine.auth.refresh_token().await {
+                Ok(_) => Ok(true),
+                Err(e) => {
+                    println!("Token refresh failed (will require re-login): {e:#}");
+                    Ok(false)
+                }
+            }
+        }
         Err(_) => Ok(false),
     }
 }
@@ -75,8 +84,18 @@ pub async fn start_login(state: State<'_, AppState>) -> Result<String, String> {
 #[tauri::command]
 pub async fn get_hubs(state: State<'_, AppState>) -> Result<Vec<HubInfo>, String> {
     let engine = state.engine.lock().await;
-    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
-    let hubs = engine.data_mgmt.get_hubs(&token).await.map_err(|e| format!("{e:#}"))?;
+    let mut token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    
+    // Try fetching hubs; if auth fails, refresh and retry once
+    let hubs = match engine.data_mgmt.get_hubs(&token).await {
+        Ok(h) => h,
+        Err(e) => {
+            println!("get_hubs failed ({}), attempting token refresh...", e);
+            let refreshed = engine.auth.refresh_token().await.map_err(|e| format!("Token refresh failed: {e:#}"))?;
+            token = refreshed.access_token;
+            engine.data_mgmt.get_hubs(&token).await.map_err(|e| format!("{e:#}"))?
+        }
+    };
     
     for h in &hubs {
         println!("Loaded Hub: {} (ID: {})", h.attributes.name, h.id);
