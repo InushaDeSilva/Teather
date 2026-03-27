@@ -49,3 +49,6 @@ thiserror = "2"
 
 # UUID generation
 uuid = { version = "1", features = ["v4"] }
+
+# URL-encode APS version IDs in path segments (may contain `?version=`).
+urlencoding = "2"

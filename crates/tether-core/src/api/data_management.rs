@@ -329,6 +329,136 @@ impl ApsDataManagementClient {
         Ok(result.data)
     }
 
+    /// Mark a file as deleted in BIM 360 / ACC by posting a "Deleted" version.
+    /// POST /data/v1/projects/{projectId}/versions
+    pub async fn delete_item_as_deleted_version(
+        &self,
+        token: &str,
+        project_id: &str,
+        item_id: &str,
+        file_name: &str,
+    ) -> Result<VersionInfo> {
+        let url = format!("{BASE_URL}/data/v1/projects/{project_id}/versions");
+        let body = serde_json::json!({
+            "jsonapi": { "version": "1.0" },
+            "data": {
+                "type": "versions",
+                "attributes": {
+                    "name": file_name,
+                    "extension": {
+                        "type": "versions:autodesk.core:Deleted",
+                        "version": "1.0"
+                    }
+                },
+                "relationships": {
+                    "item": {
+                        "data": { "type": "items", "id": item_id }
+                    }
+                }
+            }
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Delete item (Deleted version) failed ({}): {}", status, text);
+        }
+
+        let result: JsonApiResponse<VersionInfo> = resp.json().await?;
+        Ok(result.data)
+    }
+
+    /// Rename a file by PATCHing the latest version's `name`.
+    /// PATCH /data/v1/projects/{projectId}/versions/{versionId}
+    pub async fn patch_version_name(
+        &self,
+        token: &str,
+        project_id: &str,
+        version_id: &str,
+        new_name: &str,
+    ) -> Result<VersionInfo> {
+        let encoded = urlencoding::encode(version_id);
+        let url = format!(
+            "{BASE_URL}/data/v1/projects/{project_id}/versions/{encoded}"
+        );
+        let body = serde_json::json!({
+            "jsonapi": { "version": "1.0" },
+            "data": {
+                "type": "versions",
+                "id": version_id,
+                "attributes": {
+                    "name": new_name
+                }
+            }
+        });
+
+        let resp = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("PATCH version name failed ({}): {}", status, text);
+        }
+
+        let result: JsonApiResponse<VersionInfo> = resp.json().await?;
+        Ok(result.data)
+    }
+
+    /// Rename a folder via PATCH (display name).
+    /// PATCH /data/v1/projects/{projectId}/folders/{folderId}
+    pub async fn patch_folder_display_name(
+        &self,
+        token: &str,
+        project_id: &str,
+        folder_id: &str,
+        new_name: &str,
+    ) -> Result<Folder> {
+        let url = format!(
+            "{BASE_URL}/data/v1/projects/{project_id}/folders/{folder_id}"
+        );
+        let body = serde_json::json!({
+            "jsonapi": { "version": "1.0" },
+            "data": {
+                "type": "folders",
+                "id": folder_id,
+                "attributes": {
+                    "name": new_name
+                }
+            }
+        });
+
+        let resp = self
+            .http
+            .patch(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("PATCH folder name failed ({}): {}", status, text);
+        }
+
+        let result: JsonApiResponse<Folder> = resp.json().await?;
+        Ok(result.data)
+    }
+
     // ── Internal helper ──
 
     async fn get_json<T: serde::de::DeserializeOwned>(
