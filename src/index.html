@@ -121,28 +121,68 @@
                     driveContainer.innerHTML = '<p class="empty" style="margin-left:20px;">No folders found in Drive.</p>';
                 } else {
                     for (const item of driveItems) {
-                        const div = document.createElement('div');
-                        div.className = 'tree-item project-item';
-                        div.style.marginLeft = '20px';
-                        div.innerHTML = `<span>📁 ${item.name}</span>`;
-                        div.onclick = async () => {
-                            try {
-                                await invoke('start_sync', { 
-                                    hubId: item.hub_id, 
-                                    projectId: item.project_id, 
-                                    projectName: item.name,
-                                    folderId: item.folder_id 
-                                });
-                                showStatusView();
-                            } catch (e) {
-                                alert('Failed to start sync: ' + e);
-                            }
-                        };
-                        driveContainer.appendChild(div);
+                        const indent = 20 + (item.depth || 0) * 20;
+                        if (item.depth === 0) {
+                            const header = document.createElement('div');
+                            header.className = 'tree-item';
+                            header.style.marginLeft = '20px';
+                            header.style.marginTop = '8px';
+                            header.style.opacity = '0.7';
+                            header.style.fontSize = '12px';
+                            header.innerHTML = `📂 ${item.name}`;
+                            driveContainer.appendChild(header);
+                        } else {
+                            appendFolderRow(driveContainer, item, indent);
+                        }
                     }
                 }
 
-                // 2. Load "Advanced" section for Hub/Project hierarchy
+                // 2. "Add from Drive URL" input
+                const urlSection = document.createElement('div');
+                urlSection.style.cssText = 'margin: 12px 0; padding: 10px; border: 1px dashed #444; border-radius: 8px;';
+                urlSection.innerHTML = `
+                    <div style="font-size:12px; color:#999; margin-bottom:6px;">📎 Paste an Autodesk Drive link to add a hidden folder:</div>
+                    <div style="display:flex; gap:6px;">
+                        <input id="drive-url-input" type="text" placeholder="https://drive.autodesk.com/folders/..." 
+                               style="flex:1; padding:6px 8px; border-radius:6px; border:1px solid #555; background:#1a1a24; color:#e8e8f0; font-size:12px;">
+                        <button id="drive-url-btn" style="padding:6px 12px; border-radius:6px; border:none; background:#4a6cf7; color:white; cursor:pointer; font-size:12px; white-space:nowrap;">Add folder</button>
+                    </div>
+                    <div id="drive-url-status" style="font-size:11px; margin-top:4px; color:#888;"></div>
+                `;
+                list.appendChild(urlSection);
+
+                document.getElementById('drive-url-btn').onclick = async () => {
+                    const input = document.getElementById('drive-url-input');
+                    const status = document.getElementById('drive-url-status');
+                    const rawUrl = input.value.trim();
+                    if (!rawUrl) return;
+
+                    const match = rawUrl.match(/drive\.autodesk\.com\/folders\/([A-Za-z0-9_-]+)/);
+                    if (!match) {
+                        status.style.color = '#f55';
+                        status.textContent = 'Invalid Autodesk Drive URL.';
+                        return;
+                    }
+
+                    try {
+                        status.style.color = '#888';
+                        status.textContent = 'Resolving folder...';
+                        const b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+                        const folderUrn = atob(b64);
+
+                        const resolved = await invoke('resolve_drive_folder', { folderUrn: folderUrn });
+                        status.style.color = '#4f4';
+                        status.textContent = 'Found: ' + resolved.name;
+                        input.value = '';
+
+                        appendFolderRow(driveContainer, resolved, 20);
+                    } catch (e) {
+                        status.style.color = '#f55';
+                        status.textContent = 'Error: ' + e;
+                    }
+                };
+
+                // 3. Load "Advanced" section for Hub/Project hierarchy
                 const advancedHeader = document.createElement('div');
                 advancedHeader.className = 'tree-item';
                 advancedHeader.style.marginTop = '20px';
@@ -164,6 +204,93 @@
             } catch (e) {
                 list.innerHTML = `<p class="error">Error: ${e}</p>`;
             }
+        }
+
+        function appendFolderRow(container, item, indent) {
+            const row = document.createElement('div');
+            row.className = 'tree-item project-item';
+            row.style.marginLeft = indent + 'px';
+            row.style.display = 'flex';
+            row.style.alignItems = 'center';
+            row.style.gap = '4px';
+
+            const expandBtn = document.createElement('span');
+            expandBtn.textContent = '▶';
+            expandBtn.style.cursor = 'pointer';
+            expandBtn.style.fontSize = '10px';
+            expandBtn.style.width = '16px';
+            expandBtn.style.flexShrink = '0';
+            expandBtn.title = 'Browse subfolders';
+
+            const label = document.createElement('span');
+            label.style.cursor = 'pointer';
+            label.innerHTML = `📁 ${item.name}`;
+            label.title = 'Sync this folder';
+
+            row.appendChild(expandBtn);
+            row.appendChild(label);
+            container.appendChild(row);
+
+            const childContainer = document.createElement('div');
+            childContainer.style.display = 'none';
+            container.appendChild(childContainer);
+
+            let loaded = false;
+            expandBtn.onclick = async (e) => {
+                e.stopPropagation();
+                if (childContainer.style.display === 'none') {
+                    childContainer.style.display = 'block';
+                    expandBtn.textContent = '▼';
+                    if (!loaded) {
+                        loaded = true;
+                        childContainer.innerHTML = '<p class="loading" style="margin-left:' + (indent + 20) + 'px; font-size:12px;">Loading...</p>';
+                        try {
+                            const subfolders = await invoke('get_subfolders', {
+                                projectId: item.project_id,
+                                folderId: item.folder_id
+                            });
+                            childContainer.innerHTML = '';
+                            if (subfolders.length === 0) {
+                                const empty = document.createElement('p');
+                                empty.style.marginLeft = (indent + 20) + 'px';
+                                empty.style.fontSize = '12px';
+                                empty.style.color = '#888';
+                                empty.textContent = 'No subfolders';
+                                childContainer.appendChild(empty);
+                            } else {
+                                for (const sf of subfolders) {
+                                    appendFolderRow(childContainer, {
+                                        name: sf.name,
+                                        hub_id: item.hub_id,
+                                        project_id: item.project_id,
+                                        folder_id: sf.id
+                                    }, indent + 20);
+                                }
+                            }
+                        } catch (err) {
+                            childContainer.innerHTML = '<p class="error" style="margin-left:' + (indent + 20) + 'px; font-size:12px;">Error: ' + err + '</p>';
+                        }
+                    }
+                } else {
+                    childContainer.style.display = 'none';
+                    expandBtn.textContent = '▶';
+                }
+            };
+
+            label.onclick = async (e) => {
+                e.stopPropagation();
+                try {
+                    await invoke('start_sync', {
+                        hubId: item.hub_id,
+                        projectId: item.project_id,
+                        projectName: item.name,
+                        folderId: item.folder_id
+                    });
+                    showStatusView();
+                } catch (err) {
+                    alert('Failed to start sync: ' + err);
+                }
+            };
         }
 
         function showStatusView() {

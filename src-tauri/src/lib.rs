@@ -45,6 +45,8 @@ pub fn run() {
             commands::get_projects,
             commands::get_folders,
             commands::get_drive_view,
+            commands::get_subfolders,
+            commands::resolve_drive_folder,
             commands::pause_sync,
             commands::resume_sync,
             commands::open_sync_folder,

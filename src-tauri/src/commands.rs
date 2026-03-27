@@ -37,6 +37,7 @@ pub struct DriveItemInfo {
     pub hub_id: String,
     pub project_id: String,
     pub folder_id: String,
+    pub depth: u32,
 }
 
 
@@ -152,9 +153,56 @@ pub async fn get_drive_view(state: State<'_, AppState>) -> Result<Vec<DriveItemI
         hub_id: i.hub_id,
         project_id: i.project_id,
         folder_id: i.folder_id,
+        depth: i.depth,
     }).collect())
 }
 
+
+#[tauri::command]
+pub async fn resolve_drive_folder(
+    state: State<'_, AppState>,
+    folder_urn: String,
+) -> Result<DriveItemInfo, String> {
+    let engine = state.engine.lock().await;
+    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    let item = engine
+        .data_mgmt
+        .resolve_folder_urn(&token, &folder_urn)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+
+    Ok(DriveItemInfo {
+        name: item.name,
+        hub_id: item.hub_id,
+        project_id: item.project_id,
+        folder_id: item.folder_id,
+        depth: 0,
+    })
+}
+
+#[tauri::command]
+pub async fn get_subfolders(
+    state: State<'_, AppState>,
+    project_id: String,
+    folder_id: String,
+) -> Result<Vec<FolderInfo>, String> {
+    let engine = state.engine.lock().await;
+    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    let items = engine
+        .data_mgmt
+        .get_folder_contents(&token, &project_id, &folder_id)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+
+    Ok(items
+        .into_iter()
+        .filter(|i| i.item_type == "folders")
+        .map(|i| FolderInfo {
+            id: i.id,
+            name: i.attributes.display_name,
+        })
+        .collect())
+}
 
 #[tauri::command]
 pub async fn pause_sync(state: State<'_, AppState>) -> Result<(), String> {

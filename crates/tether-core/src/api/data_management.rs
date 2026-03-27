@@ -21,28 +21,62 @@ impl ApsDataManagementClient {
         }
     }
 
-    /// Aggregates top-level folders from all projects across all hubs.
+    /// Aggregates top-level folders **and their immediate subfolder children**
+    /// from all projects across all hubs, matching the Autodesk Drive web view.
     pub async fn get_drive_view(&self, token: &str) -> Result<Vec<DriveItem>> {
         let hubs = self.get_hubs(token).await?;
         let mut drive_items = Vec::new();
 
         for hub in hubs {
             let h_id = hub.id.clone();
-            // Fetch projects for each hub
-            if let Ok(projects) = self.get_projects(token, &h_id).await {
-                for project in projects {
-                    let p_id = project.id.clone();
-                    // Fetch top folders for each project
-                    if let Ok(folders) = self.get_top_folders(token, &h_id, &p_id).await {
-                        for folder in folders {
-                            drive_items.push(DriveItem {
-                                name: folder.attributes.display_name,
-                                hub_id: h_id.clone(),
-                                project_id: p_id.clone(),
-                                folder_id: folder.id,
-                            });
+            match self.get_projects(token, &h_id).await {
+                Ok(projects) => {
+                    for project in projects {
+                        let p_id = project.id.clone();
+                        match self.get_top_folders(token, &h_id, &p_id).await {
+                            Ok(folders) => {
+                                for folder in folders {
+                                    let f_id = folder.id.clone();
+
+                                    drive_items.push(DriveItem {
+                                        name: folder.attributes.display_name,
+                                        hub_id: h_id.clone(),
+                                        project_id: p_id.clone(),
+                                        folder_id: f_id.clone(),
+                                        depth: 0,
+                                    });
+
+                                    match self.get_folder_contents(token, &p_id, &f_id).await {
+                                        Ok(contents) => {
+                                            for item in contents {
+                                                if item.item_type == "folders" {
+                                                    drive_items.push(DriveItem {
+                                                        name: item.attributes.display_name,
+                                                        hub_id: h_id.clone(),
+                                                        project_id: p_id.clone(),
+                                                        folder_id: item.id,
+                                                        depth: 1,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to fetch contents of folder {} in project {}: {:#}",
+                                                f_id, p_id, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to fetch top folders for project {} in hub {}: {:#}", p_id, h_id, e);
+                            }
                         }
                     }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch projects for hub {}: {:#}", h_id, e);
                 }
             }
         }
@@ -50,34 +84,80 @@ impl ApsDataManagementClient {
         Ok(drive_items)
     }
 
-    /// GET /project/v1/hubs
+    /// GET /project/v1/hubs (with pagination)
     pub async fn get_hubs(&self, token: &str) -> Result<Vec<Hub>> {
-        let url = format!("{BASE_URL}/project/v1/hubs");
-        
-        let resp = self.http.get(&url).bearer_auth(token).send().await?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        
-        tracing::info!("RAW HUBS RESPONSE: {}", text);
-        
-        if !status.is_success() {
-            anyhow::bail!("API request failed ({}): {}", status, text);
+        let mut all_hubs = Vec::new();
+        let mut url = Some(format!("{BASE_URL}/project/v1/hubs"));
+
+        while let Some(current_url) = url {
+            let resp = self.http.get(&current_url).bearer_auth(token).send().await?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+
+            tracing::info!("RAW HUBS RESPONSE: {}", text);
+
+            if !status.is_success() {
+                anyhow::bail!("API request failed ({}): {}", status, text);
+            }
+
+            let page: JsonApiListResponse<Hub> = serde_json::from_str(&text)
+                .context("Failed to parse hubs JSON")?;
+
+            all_hubs.extend(page.data);
+            url = page.links.and_then(|l| l.next).map(|n| n.href);
         }
-        
-        let resp: JsonApiListResponse<Hub> = serde_json::from_str(&text)
-            .context("Failed to parse hubs JSON")?;
-            
-        Ok(resp.data)
+
+        Ok(all_hubs)
     }
 
-    /// GET /project/v1/hubs/{hubId}/projects
+    /// GET /project/v1/hubs/{hubId}/projects (with pagination)
     pub async fn get_projects(&self, token: &str, hub_id: &str) -> Result<Vec<Project>> {
-        let url = format!("{BASE_URL}/project/v1/hubs/{hub_id}/projects");
-        let resp: JsonApiListResponse<Project> = self
-            .get_json(&url, token)
-            .await
-            .context("Failed to fetch projects")?;
-        Ok(resp.data)
+        let mut all_projects = Vec::new();
+        let mut url = Some(format!("{BASE_URL}/project/v1/hubs/{hub_id}/projects"));
+
+        while let Some(current_url) = url {
+            let resp: JsonApiListResponse<Project> = self
+                .get_json(&current_url, token)
+                .await
+                .context("Failed to fetch projects")?;
+
+            all_projects.extend(resp.data);
+            url = resp.links.and_then(|l| l.next).map(|n| n.href);
+        }
+
+        Ok(all_projects)
+    }
+
+    /// Resolve a folder URN by searching across all hubs/projects.
+    /// Returns the folder as a DriveItem if found in any project.
+    pub async fn resolve_folder_urn(
+        &self,
+        token: &str,
+        folder_urn: &str,
+    ) -> Result<DriveItem> {
+        let hubs = self.get_hubs(token).await?;
+
+        for hub in &hubs {
+            if let Ok(projects) = self.get_projects(token, &hub.id).await {
+                for project in &projects {
+                    let url = format!(
+                        "{BASE_URL}/data/v1/projects/{}/folders/{}",
+                        project.id, folder_urn
+                    );
+                    if let Ok(resp) = self.get_json::<JsonApiResponse<Folder>>(&url, token).await {
+                        return Ok(DriveItem {
+                            name: resp.data.attributes.display_name,
+                            hub_id: hub.id.clone(),
+                            project_id: project.id.clone(),
+                            folder_id: resp.data.id,
+                            depth: 0,
+                        });
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!("Folder not found in any project: {}", folder_urn)
     }
 
     /// GET /project/v1/hubs/{hub_id}/projects/{project_id}/topFolders

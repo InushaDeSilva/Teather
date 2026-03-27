@@ -196,4 +196,6 @@ pub struct DriveItem {
     pub hub_id: String,
     pub project_id: String,
     pub folder_id: String,
+    /// 0 = top-level folder, 1 = subfolder inside a top-level folder, etc.
+    pub depth: u32,
 }
