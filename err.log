@@ -1,0 +1,59 @@
+    Checking tether-core v0.1.0 (C:\Users\inush\Code - Win\Desktop connector fix\crates\tether-core)
+warning: unused import: `AuthorizationCode`
+ --> crates\tether-core\src\api\auth.rs:6:14
+  |
+6 |     AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
+  |              ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `warn`
+  --> crates\tether-core\src\api\auth.rs:12:21
+   |
+12 | use tracing::{info, warn};
+   |                     ^^^^
+
+warning: unused import: `info`
+ --> crates\tether-core\src\sync\cloud_poller.rs:7:22
+  |
+7 | use tracing::{debug, info, warn};
+  |                      ^^^^
+
+warning: unused import: `info`
+ --> crates\tether-core\src\sync\queue.rs:8:22
+  |
+8 | use tracing::{debug, info};
+  |                      ^^^^
+
+warning: unused imports: `SyncPriority` and `SyncTaskStatus`
+  --> crates\tether-core\src\sync\queue.rs:10:29
+   |
+10 | use super::task::{SyncTask, SyncPriority, SyncTaskStatus};
+   |                             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+
+error[E0382]: use of moved value: `v`
+   --> crates\tether-core\src\api\auth.rs:183:52
+    |
+181 |                 for (k, v) in url.query_pairs() {
+    |                         -
+    |                         |
+    |                         this reinitialization might get skipped
+    |                         move occurs because `v` has type `Cow<'_, str>`, which does not implement the `Copy` trait
+182 |                     if k == "code" { code = Some(v.into_owned()); }
+    |                                                    ------------ `v` moved due to this method call
+183 |                     if k == "state" { state = Some(v.into_owned()); }
+    |                                                    ^ value used here after move
+    |
+note: `Cow::<'_, B>::into_owned` takes ownership of the receiver `self`, which moves `v`
+   --> C:\Users\inush\.rustup\toolchains\stable-aarch64-pc-windows-msvc\lib/rustlib/src/rust\library\alloc\src\borrow.rs:331:23
+    |
+331 |     pub fn into_owned(self) -> <B as ToOwned>::Owned {
+    |                       ^^^^
+help: you can `clone` the value and consume it, but this might not be your desired behavior
+    |
+182 |                     if k == "code" { code = Some(v.clone().into_owned()); }
+    |                                                   ++++++++
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `tether-core` (lib) generated 5 warnings
+error: could not compile `tether-core` (lib) due to 1 previous error; 5 warnings emitted

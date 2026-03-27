@@ -1,35 +1,56 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use tracing::info;
 
-const SERVICE_NAME: &str = "Tether";
+fn token_file_path() -> std::path::PathBuf {
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(local_app_data)
+        .join("Tether")
+        .join("tokens.json")
+}
 
-/// Store a credential in the OS credential manager.
+fn load_tokens() -> HashMap<String, String> {
+    let path = token_file_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        if let Ok(map) = serde_json::from_str(&data) {
+            return map;
+        }
+    }
+    HashMap::new()
+}
+
+fn save_tokens(map: &HashMap<String, String>) -> Result<()> {
+    let path = token_file_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_string_pretty(map)?;
+    std::fs::write(&path, data).context("Failed to write tokens file")?;
+    Ok(())
+}
+
+/// Store a credential to the local token file.
 pub fn store_credential(key: &str, value: &str) -> Result<()> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .context("Failed to create keyring entry")?;
-    entry
-        .set_password(value)
-        .context("Failed to store credential")?;
+    let mut map = load_tokens();
+    map.insert(key.to_string(), value.to_string());
+    save_tokens(&map)?;
     info!("Stored credential: {key}");
     Ok(())
 }
 
-/// Retrieve a credential from the OS credential manager.
+/// Retrieve a credential from the local token file.
 pub fn get_credential(key: &str) -> Result<String> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .context("Failed to create keyring entry")?;
-    entry
-        .get_password()
-        .context("Credential not found or inaccessible")
+    let map = load_tokens();
+    map.get(key).cloned().context("Credential not found or inaccessible")
 }
 
-/// Delete a credential from the OS credential manager.
+/// Delete a credential from the local token file.
 pub fn delete_credential(key: &str) -> Result<()> {
-    let entry = keyring::Entry::new(SERVICE_NAME, key)
-        .context("Failed to create keyring entry")?;
-    entry
-        .delete_credential()
-        .context("Failed to delete credential")?;
-    info!("Deleted credential: {key}");
+    let mut map = load_tokens();
+    if map.remove(key).is_some() {
+        save_tokens(&map)?;
+        info!("Deleted credential: {key}");
+    }
     Ok(())
 }
+

@@ -95,11 +95,34 @@ function distToSegment(px, py, x1, y1, x2, y2) {
     return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
 }
 
+// Wrap a PNG buffer into a valid ICO file (PNG-in-ICO format)
+function makeICO(pngBuf, w, h) {
+    // ICO header: 6 bytes
+    const header = Buffer.alloc(6);
+    header.writeUInt16LE(0, 0);  // reserved
+    header.writeUInt16LE(1, 2);  // type = 1 (icon)
+    header.writeUInt16LE(1, 4);  // count = 1 image
+
+    // Directory entry: 16 bytes
+    const dir = Buffer.alloc(16);
+    dir[0] = w >= 256 ? 0 : w;   // width (0 = 256)
+    dir[1] = h >= 256 ? 0 : h;   // height (0 = 256)
+    dir[2] = 0;                   // colors (0 = no palette)
+    dir[3] = 0;                   // reserved
+    dir.writeUInt16LE(1, 4);      // color planes
+    dir.writeUInt16LE(32, 6);     // bits per pixel
+    dir.writeUInt32LE(pngBuf.length, 8);  // image size
+    dir.writeUInt32LE(22, 12);    // offset to image data (6 + 16)
+
+    return Buffer.concat([header, dir, pngBuf]);
+}
+
 fs.mkdirSync('src-tauri/icons', { recursive: true });
-fs.writeFileSync('src-tauri/icons/icon.png', makePNG(256, 256));
+
+const png256 = makePNG(256, 256);
+fs.writeFileSync('src-tauri/icons/icon.png', png256);
 fs.writeFileSync('src-tauri/icons/32x32.png', makePNG(32, 32));
 fs.writeFileSync('src-tauri/icons/128x128.png', makePNG(128, 128));
-fs.writeFileSync('src-tauri/icons/128x128@2x.png', makePNG(256, 256));
-fs.writeFileSync('src-tauri/icons/icon.ico', makePNG(256, 256));
-fs.writeFileSync('src-tauri/icons/icon.icns', makePNG(256, 256));
+fs.writeFileSync('src-tauri/icons/128x128@2x.png', png256);
+fs.writeFileSync('src-tauri/icons/icon.ico', makeICO(png256, 256, 256));
 console.log('All icons generated — two circles + tether line on indigo gradient');

@@ -10,6 +10,7 @@ use super::models::*;
 const BASE_URL: &str = "https://developer.api.autodesk.com";
 
 /// Client for APS OSS (Object Storage Service) — handles S3 signed URL upload/download.
+#[derive(Clone)]
 pub struct ApsStorageClient {
     http: Client,
 }

@@ -44,18 +44,29 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusRes
 
 #[tauri::command]
 pub async fn start_login(state: State<'_, AppState>) -> Result<String, String> {
-    let engine = state.engine.lock().await;
-    let (url, _csrf, _verifier) = engine.auth.build_auth_url();
+    let (url, csrf, verifier, auth) = {
+        let engine = state.engine.lock().await;
+        let (u, c, v) = engine.auth.build_auth_url();
+        (u, c, v, engine.auth.clone())
+    };
+
     // Open the URL in the system browser
-    opener::open(&url).map_err(|e| e.to_string())?;
-    Ok(url)
+    opener::open(&url).map_err(|e| format!("Failed to open browser: {}", e))?;
+
+    // Wait for the callback
+    let code = auth.listen_for_callback(&csrf).await.map_err(|e| format!("Login failed: {}", e))?;
+    
+    // Exchange code for tokens
+    let _token = auth.exchange_code(&code, &verifier).await.map_err(|e| format!("Token exchange failed: {}", e))?;
+
+    Ok("success".to_string())
 }
 
 #[tauri::command]
 pub async fn get_hubs(state: State<'_, AppState>) -> Result<Vec<HubInfo>, String> {
     let engine = state.engine.lock().await;
-    let token = engine.auth.get_access_token().map_err(|e| e.to_string())?;
-    let hubs = engine.data_mgmt.get_hubs(&token).await.map_err(|e| e.to_string())?;
+    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    let hubs = engine.data_mgmt.get_hubs(&token).await.map_err(|e| format!("{e:#}"))?;
     Ok(hubs.into_iter().map(|h| HubInfo {
         id: h.id,
         name: h.attributes.name,
@@ -65,8 +76,8 @@ pub async fn get_hubs(state: State<'_, AppState>) -> Result<Vec<HubInfo>, String
 #[tauri::command]
 pub async fn get_projects(state: State<'_, AppState>, hub_id: String) -> Result<Vec<ProjectInfo>, String> {
     let engine = state.engine.lock().await;
-    let token = engine.auth.get_access_token().map_err(|e| e.to_string())?;
-    let projects = engine.data_mgmt.get_projects(&token, &hub_id).await.map_err(|e| e.to_string())?;
+    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    let projects = engine.data_mgmt.get_projects(&token, &hub_id).await.map_err(|e| format!("{e:#}"))?;
     Ok(projects.into_iter().map(|p| ProjectInfo {
         id: p.id,
         name: p.attributes.name,
@@ -74,10 +85,11 @@ pub async fn get_projects(state: State<'_, AppState>, hub_id: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn get_folders(state: State<'_, AppState>, project_id: String) -> Result<Vec<FolderInfo>, String> {
+pub async fn get_folders(state: State<'_, AppState>, hub_id: String, project_id: String) -> Result<Vec<FolderInfo>, String> {
     let engine = state.engine.lock().await;
-    let token = engine.auth.get_access_token().map_err(|e| e.to_string())?;
-    let folders = engine.data_mgmt.get_top_folders(&token, &project_id).await.map_err(|e| e.to_string())?;
+    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    let folders = engine.data_mgmt.get_top_folders(&token, &hub_id, &project_id).await
+        .map_err(|e| format!("{e:#}"))?;
     Ok(folders.into_iter().map(|f| FolderInfo {
         id: f.id,
         name: f.attributes.display_name,
@@ -100,7 +112,14 @@ pub async fn resume_sync(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn open_sync_folder(state: State<'_, AppState>) -> Result<(), String> {
     let engine = state.engine.lock().await;
     if let Some(ref path) = engine.sync_root_path() {
-        opener::open(path).map_err(|e| e.to_string())?;
+        opener::open(path).map_err(|e| format!("{e:#}"))?;
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_sync(state: State<'_, AppState>, hub_id: String, project_id: String, project_name: String) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.start(&hub_id, &project_id, &project_name).await.map_err(|e| format!("{e:#}"))?;
     Ok(())
 }

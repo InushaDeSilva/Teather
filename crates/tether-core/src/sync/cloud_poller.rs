@@ -67,6 +67,10 @@ pub async fn start_polling(
 
                 // Check for new/updated cloud items
                 for item in &cloud_items {
+                    if item.item_type != "items" {
+                        continue; // Skip sub-folders for MVP flat-sync, or until recursive traversal is implemented
+                    }
+
                     let display_name = &item.attributes.display_name;
                     let existing = local_entries.iter().find(|e| {
                         e.cloud_item_id.as_deref() == Some(&item.id)

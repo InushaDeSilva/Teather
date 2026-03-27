@@ -17,8 +17,13 @@ pub struct JsonApiListResponse<T> {
 #[derive(Debug, Deserialize)]
 pub struct PaginationLinks {
     #[serde(rename = "self")]
-    pub self_link: Option<String>,
-    pub next: Option<String>,
+    pub self_link: Option<Link>,
+    pub next: Option<Link>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Link {
+    pub href: String,
 }
 
 // ── Hubs ──

@@ -7,6 +7,8 @@ use oauth2::{
     TokenUrl,
 };
 use reqwest;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::api::models::TokenResponse;
@@ -19,6 +21,7 @@ const TOKEN_ACCESS_KEY: &str = "access_token";
 const TOKEN_REFRESH_KEY: &str = "refresh_token";
 
 /// APS authentication client using OAuth 2.0 with PKCE.
+#[derive(Clone)]
 pub struct ApsAuthClient {
     client_id: String,
     redirect_uri: String,
@@ -145,5 +148,60 @@ impl ApsAuthClient {
         let _ = secure_storage::delete_credential(TOKEN_REFRESH_KEY);
         info!("Cleared stored tokens");
         Ok(())
+    }
+
+    /// Spin up a local TCP server on port 8765 to listen for the OAuth callback.
+    /// Returns the authorization code if the state matches.
+    pub async fn listen_for_callback(&self, expected_state: &str) -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:8765").await?;
+        info!("Listening for OAuth callback on http://127.0.0.1:8765/callback");
+
+        loop {
+            let (mut socket, _) = listener.accept().await?;
+            let mut buf = [0; 4096];
+            let n = socket.read(&mut buf).await?;
+            if n == 0 {
+                continue;
+            }
+
+            let request_str = String::from_utf8_lossy(&buf[..n]);
+            if request_str.starts_with("GET /callback?") {
+                let first_line = request_str.lines().next().unwrap_or("");
+                let mut parts = first_line.split_whitespace();
+                parts.next(); // GET
+                let path = parts.next().unwrap_or(""); // /callback?...
+                
+                let full_url = format!("http://localhost{}", path);
+                let Ok(url) = reqwest::Url::parse(&full_url) else {
+                    continue;
+                };
+
+                let mut code = None;
+                let mut state = None;
+                for (k, v) in url.query_pairs() {
+                    if k == "code" { code = Some(v.to_string()); }
+                    else if k == "state" { state = Some(v.to_string()); }
+                }
+
+                if state.as_deref() != Some(expected_state) {
+                    let response = "HTTP/1.1 400 Bad Request\r\n\r\nCSRF state mismatch. Please close this window and try again.";
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    anyhow::bail!("OAuth CSRF state mismatch");
+                }
+
+                if let Some(c) = code {
+                    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><head><title>Success</title><style>body{font-family:sans-serif;background:#0f0f14;color:#e8e8f0;display:flex;align-items:center;justify-content:center;height:100vh;}div{text-align:center;background:#1e1e2a;padding:40px;border-radius:12px;}</style></head><body><div><h2>Authentication Successful 🎉</h2><p>You can close this window and return to Tether.</p></div></body></html>";
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return Ok(c);
+                } else {
+                    let response = "HTTP/1.1 400 Bad Request\r\n\r\nNo auth code found.";
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    anyhow::bail!("OAuth callback missing code parameter");
+                }
+            } else {
+                let response = "HTTP/1.1 404 Not Found\r\n\r\nNot Found";
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        }
     }
 }

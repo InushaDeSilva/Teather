@@ -9,6 +9,7 @@ use super::models::*;
 const BASE_URL: &str = "https://developer.api.autodesk.com";
 
 /// Client for Autodesk Platform Services Data Management API.
+#[derive(Clone)]
 pub struct ApsDataManagementClient {
     http: Client,
 }
@@ -40,9 +41,9 @@ impl ApsDataManagementClient {
         Ok(resp.data)
     }
 
-    /// GET /data/v1/projects/{projectId}/topFolders
-    pub async fn get_top_folders(&self, token: &str, project_id: &str) -> Result<Vec<Folder>> {
-        let url = format!("{BASE_URL}/data/v1/projects/{project_id}/topFolders");
+    /// GET /project/v1/hubs/{hub_id}/projects/{project_id}/topFolders
+    pub async fn get_top_folders(&self, token: &str, hub_id: &str, project_id: &str) -> Result<Vec<Folder>> {
+        let url = format!("{BASE_URL}/project/v1/hubs/{hub_id}/projects/{project_id}/topFolders");
         let resp: JsonApiListResponse<Folder> = self
             .get_json(&url, token)
             .await
@@ -70,7 +71,7 @@ impl ApsDataManagementClient {
                 .context("Failed to fetch folder contents")?;
 
             all_items.extend(resp.data);
-            url = resp.links.and_then(|l| l.next);
+            url = resp.links.and_then(|l| l.next).map(|n| n.href);
         }
 
         Ok(all_items)

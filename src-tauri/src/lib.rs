@@ -46,6 +46,7 @@ pub fn run() {
             commands::pause_sync,
             commands::resume_sync,
             commands::open_sync_folder,
+            commands::start_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tether");

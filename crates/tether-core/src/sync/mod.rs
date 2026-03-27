@@ -5,3 +5,4 @@ pub mod engine;
 pub mod hasher;
 pub mod queue;
 pub mod task;
+pub mod worker;
