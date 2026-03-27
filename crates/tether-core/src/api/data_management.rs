@@ -211,6 +211,30 @@ impl ApsDataManagementClient {
         Ok(resp.data)
     }
 
+    /// GET /data/v1/projects/{projectId}/items/{itemId} — includes `parent` folder.
+    pub async fn get_item_with_parent_folder(
+        &self,
+        token: &str,
+        project_id: &str,
+        item_id: &str,
+    ) -> Result<(Item, String)> {
+        let enc = urlencoding::encode(item_id);
+        let url = format!("{BASE_URL}/data/v1/projects/{project_id}/items/{enc}");
+        let item: Item = self
+            .get_json::<JsonApiResponse<Item>>(&url, token)
+            .await
+            .context("Failed to fetch item")?
+            .data;
+        let parent = item
+            .relationships
+            .as_ref()
+            .and_then(|r| r.parent.as_ref())
+            .and_then(|p| p.data.as_ref())
+            .map(|d| d.id.clone())
+            .context("Item response missing parent folder")?;
+        Ok((item, parent))
+    }
+
     /// Create a new item in a folder.
     /// POST /data/v1/projects/{projectId}/items
     pub async fn create_item(

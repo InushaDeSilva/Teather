@@ -5,9 +5,9 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, info};
+use tracing::debug;
 
-use super::task::{SyncTask, SyncPriority, SyncTaskStatus};
+use super::task::SyncTask;
 
 /// Wrapper to make SyncTask orderable by priority (highest first).
 struct PrioritizedTask(SyncTask);
@@ -66,6 +66,21 @@ impl SyncQueue {
     /// Number of tasks currently queued.
     pub async fn len(&self) -> usize {
         self.queue.lock().await.len()
+    }
+
+    /// Snapshot queued tasks without removing them (order is oldest-first in the returned vec).
+    pub async fn snapshot_queue_views(&self) -> Vec<super::task::QueueJobView> {
+        let mut heap = self.queue.lock().await;
+        let mut temp: Vec<SyncTask> = Vec::new();
+        while let Some(p) = heap.pop() {
+            temp.push(p.0);
+        }
+        temp.sort_by_key(|t| t.queued_at);
+        let views: Vec<_> = temp.iter().map(|t| t.to_queue_view()).collect();
+        for t in temp {
+            heap.push(PrioritizedTask(t));
+        }
+        views
     }
 
     /// Get an upload semaphore permit (blocks until a slot is free).

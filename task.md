@@ -1,101 +1,90 @@
 # Tether: Autodesk Cloud Sync for ARM64 (Rust + Tauri)
 
-## Phase 1: Core Sync Engine (MVP)
+**Execution source of truth** — last aligned with `todo.md` (Desktop Connector parity) on 2026-03-27.
 
-### Project Setup
-- [x] Create Cargo workspace with `tether-core` (lib) and `src-tauri` (Tauri app)
-- [x] Initialize Tauri 2.x project with frontend (`src/`)
-- [x] Add all dependencies per handover doc §7
-- [x] Create project directory structure per handover doc §6
+## Completed — Phase 1: Core sync engine (MVP)
 
-### APS API Client (`crates/tether-core/src/api/`)
-- [x] OAuth 2.0 PKCE auth flow (`auth.rs`)
-  - [x] Build auth URL with PKCE challenge
-  - [x] Local TCP callback listener (port 8765)
-  - [x] Token exchange + refresh
-  - [x] Persist tokens to local JSON file
-- [x] Auto-Login Flow (UI + Backend)
-  - [x] Persist tokens via secure_storage
-  - [x] Tauri command to check validity + auto-refresh
-  - [x] Auto-bypass login screen if valid
-- [x] Data Management API (`data_management.rs`)
-  - [x] `get_hubs` — list hubs with pagination
-  - [x] `get_projects` — list projects per hub with pagination
-  - [x] `get_top_folders` — list top folders per project
-  - [x] `get_folder_contents` — list items/subfolders with pagination
-  - [x] `get_item_versions` — fetch item versions
-  - [x] `create_item` — create new item in folder
-  - [x] `create_version` — create new version of existing item
-  - [x] `get_drive_view` — aggregated view: top folders + immediate subfolder children across all hubs/projects
-  - [x] `resolve_folder_urn` — resolve any folder URN by searching across all hubs/projects (for hidden Drive folders)
-- [x] Storage client (`storage.rs`) — S3 signed URL upload/download workflow
-- [x] API models (`models.rs`) — serde DTOs for Hub, Project, Folder, Item, Version, TokenResponse, DriveItem
+### Project setup
+- [x] Cargo workspace (`tether-core`, `src-tauri`)
+- [x] Tauri 2.x + frontend
+- [x] Dependencies per handover §7
+- [x] Directory structure per handover §6
 
-### State Database (`crates/tether-core/src/db/`)
-- [x] SQLite schema via `rusqlite` (sync_roots, file_entries, auth_state, activity_log)
-- [x] `database.rs` — CRUD operations
-- [x] `migrations.rs` — schema creation
+### APS API (`crates/tether-core/src/api/`)
+- [x] OAuth 2.0 PKCE (`auth.rs`), secure storage, auto-login UI
+- [x] Data Management: hubs, projects, folders, items, versions, Drive view, `resolve_folder_urn`
+- [x] Storage (`storage.rs`), models (`models.rs`)
 
-### Sync Engine (`crates/tether-core/src/sync/`)
-- [x] `engine.rs` — main orchestrator (start sync, pause/resume, status, default folder selection)
-- [x] `queue.rs` — priority queue + scheduler (max 4 concurrent: 2 up / 2 down)
-- [x] `task.rs` — SyncTask, SyncOperation, SyncPriority, SyncTaskStatus
-- [x] `change_detector.rs` — `notify` crate + `notify-debouncer-full` (3s debounce, exclusion rules)
-- [x] `cloud_poller.rs` — periodic polling (30s) via `tokio::time::interval`
-- [x] `worker.rs` — S3 download background loops (downloads, conflict check vs cloud `lastModifiedTime`, `KeepBoth` safety copy, post-write hash)
-- [x] `conflict.rs` — last-write-wins with safety copy (wired in download path)
-- [x] `hasher.rs` — SHA-256 via `sha2` crate (wired after successful writes)
+### Database (`crates/tether-core/src/db/`)
+- [x] SQLite: `sync_roots`, `file_entries`, `auth_state`, `activity_log`
+- [x] Extended schema: hydration/pin/lock/base-version fields, `pending_jobs`, `inventor_project_context` (see migrations)
 
-### Configuration (`crates/tether-core/src/config/`)
-- [x] `settings.rs` — settings model (AppSettings, load from defaults)
-- [x] `secure_storage.rs` — local token file storage (`%LOCALAPPDATA%\Tether\tokens.json`)
+### Sync engine (`crates/tether-core/src/sync/`)
+- [x] `engine`, `queue`, `task`, `change_detector`, `cloud_poller`, `worker`
+- [x] `conflict.rs` — keep-both naming + **stale-base upload gate** (no silent overwrite)
+- [x] `hasher.rs` — SHA-256
+- [x] `save_patterns` — coalesce delete+recreate / temp-rename save patterns
+- [x] `reference` — Inventor-oriented reference discovery + prefetch closure (heuristic)
+- [x] `urls` — View Online / Copy Link URLs (ACC-oriented)
+- [x] `diagnostics` — log bundle export
 
-### Tauri App (`src-tauri/`)
-- [x] `lib.rs` — app entry, tray setup, plugin registration (shell, notification, positioner, single-instance, autostart)
-- [x] `commands.rs` — `#[tauri::command]` handlers:
-  - [x] `check_auth_status` — validate + refresh stored token
-  - [x] `start_login` — launch OAuth flow in system browser
-  - [x] `get_hubs` — list hubs with extension type info
-  - [x] `get_projects` — list projects for a hub
-  - [x] `get_folders` — list top folders for a project
-  - [x] `get_drive_view` — aggregated Drive folder view with depth
-  - [x] `get_subfolders` — browse subfolder contents of any folder
-  - [x] `resolve_drive_folder` — resolve an Autodesk Drive URL folder URN
-  - [x] `start_sync` — start sync for a hub/project/folder
-  - [x] `get_sync_status` — poll current sync status + queue count
-  - [x] `pause_sync` / `resume_sync` — toggle sync state
-  - [x] `open_sync_folder` — open local sync folder in explorer
-- [x] `tray.rs` — system tray icon setup
-- [x] `state.rs` — shared app state (`Arc<Mutex<SyncEngine>>`)
+### Tauri (`src-tauri/`)
+- [x] Tray, commands, state
+- [x] Parity-oriented commands: session info, sync-now, view-online URL, copy-link, pin/free-up-space, IPJ, troubleshooter, diagnostics
 
-### Frontend UI (`src/`)
-- [x] `index.html` — single-page app with three views:
-  - [x] Login view — "Sign in with Autodesk" button + status text
-  - [x] Project picker view:
-    - [x] Autodesk Drive section — flat view of all top folders + subfolders (depth-based grouping)
-    - [x] Expandable folder tree — click ▶ to browse subfolders recursively, click folder name to sync
-    - [x] Paste Drive URL — input field to add hidden Autodesk Drive folders by URL
-    - [x] All Projects (Advanced) — hub → project tree with click-to-expand
-  - [x] Sync status view — live polling (5s), activity list, open folder + pause/resume buttons
-- [x] `styles/main.css` — dark theme styling
+### Frontend (`src/`)
+- [x] Login, picker, sync status
+- [x] Troubleshooter / parity tools section (session, diagnostics, IPJ)
 
-### Hub & Folder Discovery
-- [x] Hub filtering — identify and prioritize Autodesk Drive (`hubs:autodesk.core:Hub`)
-- [x] Paginated hub/project/folder enumeration — follows `links.next` for all list endpoints
-- [x] Error logging in `get_drive_view` — warns on failed hub/project/folder fetches instead of silent swallowing
-- [x] Hidden Drive folder support — `resolve_folder_urn` finds folders in hidden "Drive Project" roots not returned by `topFolders`
+### Hub & folder discovery
+- [x] Drive hub priority, pagination, hidden folder resolution, error logging
 
-## Phase 2: CFAPI Placeholder Integration (Post-MVP)
-- [x] Windows CFAPI Integration (`tether-cfapi` crate)
-  - [x] Native Sync Root Registration (`registry.rs`)
-  - [x] Wire up `cloud-filter` Session
-- [x] CFAPI Callbacks (`tether-cfapi` / `filter.rs`)
-  - [x] `fetch_placeholders` — sync directory tree
-  - [x] `fetch_data` — hydrate files on-demand
-  - [x] `delete` / `rename` — propagate local delete/rename to APS (Data Management)
-- [x] Placeholder creation, status overlays — driven by `mark_in_sync` / `ticket.report_progress` in filter callbacks
-- [x] MSIX packaging via `winapp` CLI — `src-tauri/appxmanifest.xml`, `packaging/Package.appxmanifest`, `packaging/README.md` (see README for `cargo winapp pack`)
+## Completed — Phase 2: CFAPI
 
-## Phase 3: Polish (Future)
-- [ ] Selective sync, bandwidth throttling, conflict UI
-- [ ] Context menu integration, Inventor add-in, webhooks, auto-update
+- [x] Sync root registration, `cloud-filter` session
+- [x] `fetch_placeholders`, `fetch_data`, delete/rename propagation
+- [x] Hydration callback → DB state (`on_hydration_complete`)
+- [x] Dehydrate helper (`tether_cfapi::dehydrate_placeholder_file`) for Free up space
+- [x] MSIX packaging assets (`packaging/`, appx manifests)
+
+## Desktop Connector parity backlog (P0–P4)
+
+### P0 — Core safety & state
+- [x] DB: `hydration_state`, `pin_state`, `lock_state`, `base_remote_version_id`, `hydration_reason`
+- [x] Stale-base conflict detection + keep-both default (upload path guarded)
+- [x] Save-pattern normalization hooks
+- [ ] Full upload pipeline with stale-base checks on every path (extend as upload work lands)
+
+### P1 — Explorer semantics
+- [x] Manual **Sync Now** (app + API; Explorer context menu = MSIX manifest stub / future shell)
+- [x] **Free up space** / **Always keep on this device** (API + dehydrate; pin stored in DB)
+- [x] **View Online** / **Copy Link** URL helpers
+- [ ] Bulk-delete confirmation + sync-blocking queue (skeleton: `pending_jobs` + flags)
+
+### P2 — Inventor / references
+- [x] Reference graph helper + prefetch closure (heuristic `.iam` / `.ipt`)
+- [x] IPJ path persistence (`inventor_project_context`)
+- [ ] Deeper CAD parsers, Fusion/Docs edge cases
+
+### P3 — Locks, metadata, ops
+- [ ] Lock/unlock API + read-only enforcement (`lock_state` reserved)
+- [ ] Rich metadata / Data Panel (fields stubbed; API wiring incremental)
+- [x] Troubleshooter panel + diagnostics ZIP
+- [ ] Auto-update
+
+### P4 — Verify first
+- [ ] **Export…** verb semantics (capture from x64 Desktop Connector before coding)
+- [ ] Shell rich columns (optional)
+
+## Test matrix (manual / parity)
+
+Documented in [tests/PARITY_TEST_MATRIX.md](tests/PARITY_TEST_MATRIX.md). Run alongside Autodesk Desktop Connector on x64 where applicable.
+
+## Milestones
+
+| Milestone | Criteria |
+|-----------|----------|
+| M1 Parity core | No silent overwrite; hydration/dehydrate/pin state persisted; stale-base awareness |
+| M2 Explorer parity | Sync / View online / Copy link / Free up space / Pin from app API |
+| M3 Inventor parity | Reference closure + IPJ context for assembly workflows |
+| M4 Ops parity | Troubleshooter, diagnostics bundle, recovery tools expanded |

@@ -51,6 +51,15 @@
             </div>
 
             <div class="card">
+                <h3>Sync queue</h3>
+                <p class="meta">Worker jobs (upload/download). Explorer’s own “Sync pending” clears after upload finishes. Tray tooltip updates every few seconds.</p>
+                <p id="queue-summary" class="meta" style="margin-top:6px;"></p>
+                <ul id="queue-jobs" class="activity-list">
+                    <li class="empty">No jobs queued</li>
+                </ul>
+            </div>
+
+            <div class="card">
                 <h3>Recent Activity</h3>
                 <ul id="activity-list" class="activity-list">
                     <li class="empty">No activity yet</li>
@@ -60,6 +69,20 @@
             <div class="actions">
                 <button id="btn-open-folder" class="btn btn-secondary">📁 Open sync folder</button>
                 <button id="btn-pause" class="btn btn-secondary">⏸ Pause syncing</button>
+            </div>
+
+            <div class="card">
+                <h3>Troubleshooter &amp; parity tools</h3>
+                <p class="meta">Session info, activity tail, diagnostics bundle (see <code>tests/PARITY_TEST_MATRIX.md</code>).</p>
+                <pre id="troubleshooter-out" style="max-height:140px;overflow:auto;font-size:11px;background:#1a1a1f;padding:8px;border-radius:6px;"></pre>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
+                    <button type="button" id="btn-trouble-report" class="btn btn-secondary">Refresh report</button>
+                    <button type="button" id="btn-diagnostics" class="btn btn-secondary">Export diagnostics ZIP</button>
+                </div>
+                <p id="diag-path" class="meta" style="margin-top:8px;"></p>
+                <label class="meta" for="ipj-input">Inventor project (.ipj) path</label>
+                <input type="text" id="ipj-input" placeholder="C:\Projects\MyProject.ipj" style="width:100%;margin:6px 0;padding:8px;border-radius:6px;border:1px solid #333;background:#111;color:#eee;">
+                <button type="button" id="btn-save-ipj" class="btn btn-secondary">Save IPJ</button>
             </div>
         </div>
     </div>
@@ -296,6 +319,33 @@
         function showStatusView() {
             document.getElementById('picker-view').classList.remove('active');
             document.getElementById('status-view').classList.add('active');
+            loadTroubleshooter();
+            loadIpj();
+        }
+
+        async function loadTroubleshooter() {
+            const out = document.getElementById('troubleshooter-out');
+            try {
+                const session = await invoke('get_sync_session');
+                const report = await invoke('get_troubleshooter_report');
+                const lines = [
+                    JSON.stringify(session, null, 2),
+                    '--- Activity ---',
+                    ...(report.activity_lines || []).slice(0, 15),
+                    '--- Pending jobs ---',
+                    ...(report.pending_job_summaries || []).slice(0, 10),
+                ];
+                out.textContent = lines.join('\n');
+            } catch (e) {
+                out.textContent = 'Troubleshooter: ' + e;
+            }
+        }
+
+        async function loadIpj() {
+            try {
+                const p = await invoke('get_inventor_ipj');
+                if (p) document.getElementById('ipj-input').value = p;
+            } catch (_) {}
         }
 
         async function loadProjects(hubId, selectedElement) {
@@ -342,9 +392,38 @@
                 const statusText = document.getElementById('status-text');
                 const statusIcon = document.getElementById('status-icon');
 
+                const summary = document.getElementById('queue-summary');
+                const qList = document.getElementById('queue-jobs');
+                if (summary && qList) {
+                    const n = resp.queued_count ?? 0;
+                    const jobs = resp.queue_jobs || [];
+                    summary.textContent =
+                        n === 0
+                            ? 'Queue empty.'
+                            : `${n} job(s) in queue — ${jobs.length} shown below`;
+                    qList.innerHTML = '';
+                    if (jobs.length === 0) {
+                        const li = document.createElement('li');
+                        li.className = n > 0 ? 'empty' : 'empty';
+                        li.textContent = n > 0 ? '(Tasks are running or snapshot empty — wait a tick.)' : 'No jobs queued';
+                        qList.appendChild(li);
+                    } else {
+                        for (const j of jobs) {
+                            const li = document.createElement('li');
+                            const short = j.cloud_item_id
+                                ? ` — ${String(j.cloud_item_id).slice(0, 18)}…`
+                                : '';
+                            li.textContent = `${j.operation} — ${j.local_path}${short}`;
+                            li.title = j.queued_at_rfc3339 || '';
+                            qList.appendChild(li);
+                        }
+                    }
+                }
+
                 if (resp.status === 'Idle') {
                     statusIcon.textContent = '✓';
-                    statusText.textContent = 'Up to date';
+                    statusText.textContent =
+                        (resp.queued_count ?? 0) > 0 ? `Sync busy (${resp.queued_count} queued)` : 'Up to date';
                 } else if (resp.status === 'Paused') {
                     statusIcon.textContent = '⏸';
                     statusText.textContent = 'Paused';
@@ -370,6 +449,26 @@
             } else {
                 await invoke('resume_sync');
                 btn.textContent = '⏸ Pause syncing';
+            }
+        });
+
+        document.getElementById('btn-trouble-report')?.addEventListener('click', loadTroubleshooter);
+        document.getElementById('btn-diagnostics')?.addEventListener('click', async () => {
+            const el = document.getElementById('diag-path');
+            try {
+                const path = await invoke('collect_diagnostics_bundle');
+                el.textContent = 'Saved: ' + path;
+            } catch (e) {
+                el.textContent = 'Error: ' + e;
+            }
+        });
+        document.getElementById('btn-save-ipj')?.addEventListener('click', async () => {
+            const v = document.getElementById('ipj-input').value.trim();
+            try {
+                await invoke('set_inventor_ipj', { ipjPath: v || null });
+                alert('IPJ path saved.');
+            } catch (e) {
+                alert('Failed: ' + e);
             }
         });
 

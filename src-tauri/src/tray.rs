@@ -4,9 +4,9 @@ use tauri::{
 };
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("tether")
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("Tether — Up to date")
+        .tooltip("Tether — idle (open window for queue)")
         .on_tray_icon_event(|tray_handle, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,

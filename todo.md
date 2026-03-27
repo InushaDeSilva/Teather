@@ -22,18 +22,17 @@
 - System tray + sync status UI
 - CFAPI registration and session wiring
 
-### Still missing from the original task
-- `conflict.rs` and a real stale-base / keep-both conflict flow
-- `hasher.rs`
-- CFAPI `fetch_placeholders`
-- CFAPI `fetch_data`
-- CFAPI `notify_delete` / `notify_rename`
-- Placeholder creation / hydration / dehydration semantics
-- Status overlays / icon parity
-- MSIX packaging
-- Context menu integration
-- Inventor-specific workflow parity
-- Auto-update / advanced troubleshooting / conflict UI
+### Still missing from the original task *(see [task.md](task.md) for live parity backlog)*
+- Full **upload** pipeline with stale-base checks on every path
+- **Explorer shell** context menus (MSIX manifest stubs exist; full Windows 11 integration ongoing)
+- **Lock/unlock** APS workflows + read-only enforcement
+- Rich **metadata / Data Panel** (fields + API wiring incremental)
+- **Bulk-delete** blocking queue + admin thresholds (DB `pending_jobs` ready)
+- **Export…** verb — verify on x64 Desktop Connector before implementing
+- **Auto-update** / **Inventor add-in**
+- **Webhooks** (optional vs polling)
+
+**Implemented since this snapshot:** stale-base evaluation + keep-both download path, DB hydration/pin/lock columns, `save_patterns` coalescer hook, `reference` + `sync_now`, `urls` (view online / copy link), CFAPI `on_hydration_complete`, dehydration helper, cloud poller skips `online_only` auto-pull, troubleshooter + diagnostics ZIP, IPJ persistence, parity test matrix doc.
 
 ---
 

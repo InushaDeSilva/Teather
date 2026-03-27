@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, Row};
 use tracing::info;
 use uuid::Uuid;
 
@@ -27,7 +27,6 @@ impl SyncDatabase {
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
-        // Enable WAL mode for better concurrent read performance.
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
         migrations::run_migrations(&conn)?;
@@ -37,11 +36,8 @@ impl SyncDatabase {
     }
 
     fn default_path() -> PathBuf {
-        let local_app_data =
-            std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-        PathBuf::from(local_app_data)
-            .join("Tether")
-            .join("tether.db")
+        let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
+        PathBuf::from(local_app_data).join("Tether").join("tether.db")
     }
 
     // ── Sync roots ──
@@ -63,23 +59,38 @@ impl SyncDatabase {
         Ok(id)
     }
 
+    pub fn get_sync_root(&self, id: &str) -> Result<Option<SyncRootRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, hub_id, project_id, folder_id, local_path, display_name, last_full_sync,
+                    COALESCE(delete_prompt_pending, 0), last_poll_at
+             FROM sync_roots WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| Self::map_sync_root(row))?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn get_active_sync_roots(&self) -> Result<Vec<SyncRootRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, hub_id, project_id, folder_id, local_path, display_name, last_full_sync
+            "SELECT id, hub_id, project_id, folder_id, local_path, display_name, last_full_sync,
+                    COALESCE(delete_prompt_pending, 0), last_poll_at
              FROM sync_roots WHERE is_active = 1",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(SyncRootRow {
-                id: row.get(0)?,
-                hub_id: row.get(1)?,
-                project_id: row.get(2)?,
-                folder_id: row.get(3)?,
-                local_path: row.get(4)?,
-                display_name: row.get(5)?,
-                last_full_sync: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map([], |row| Self::map_sync_root(row))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    fn map_sync_root(row: &Row<'_>) -> rusqlite::Result<SyncRootRow> {
+        Ok(SyncRootRow {
+            id: row.get(0)?,
+            hub_id: row.get(1)?,
+            project_id: row.get(2)?,
+            folder_id: row.get(3)?,
+            local_path: row.get(4)?,
+            display_name: row.get(5)?,
+            last_full_sync: row.get(6)?,
+            delete_prompt_pending: row.get::<_, i64>(7)? != 0,
+            last_poll_at: row.get(8)?,
+        })
     }
 
     // ── File entries ──
@@ -89,8 +100,9 @@ impl SyncDatabase {
             "INSERT INTO file_entries
                 (id, sync_root_id, local_relative_path, cloud_item_id, cloud_version_id,
                  cloud_storage_urn, local_hash, cloud_hash, file_size,
-                 last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory,
+                 hydration_state, pin_state, lock_state, base_remote_version_id, base_remote_modified, hydration_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(sync_root_id, local_relative_path) DO UPDATE SET
                 cloud_item_id = excluded.cloud_item_id,
                 cloud_version_id = excluded.cloud_version_id,
@@ -101,7 +113,13 @@ impl SyncDatabase {
                 last_local_modified = excluded.last_local_modified,
                 last_cloud_modified = excluded.last_cloud_modified,
                 sync_state = excluded.sync_state,
-                is_placeholder = excluded.is_placeholder",
+                is_placeholder = excluded.is_placeholder,
+                hydration_state = excluded.hydration_state,
+                pin_state = excluded.pin_state,
+                lock_state = excluded.lock_state,
+                base_remote_version_id = excluded.base_remote_version_id,
+                base_remote_modified = excluded.base_remote_modified,
+                hydration_reason = excluded.hydration_reason",
             rusqlite::params![
                 entry.id,
                 entry.sync_root_id,
@@ -117,67 +135,190 @@ impl SyncDatabase {
                 entry.sync_state,
                 entry.is_placeholder,
                 entry.is_directory,
+                entry.hydration_state,
+                entry.pin_state,
+                entry.lock_state,
+                entry.base_remote_version_id,
+                entry.base_remote_modified,
+                entry.hydration_reason,
             ],
         )?;
         Ok(())
     }
+
+    fn map_file_entry(row: &Row<'_>) -> rusqlite::Result<FileEntryRow> {
+        Ok(FileEntryRow {
+            id: row.get(0)?,
+            sync_root_id: row.get(1)?,
+            local_relative_path: row.get(2)?,
+            cloud_item_id: row.get(3)?,
+            cloud_version_id: row.get(4)?,
+            cloud_storage_urn: row.get(5)?,
+            local_hash: row.get(6)?,
+            cloud_hash: row.get(7)?,
+            file_size: row.get(8)?,
+            last_local_modified: row.get(9)?,
+            last_cloud_modified: row.get(10)?,
+            sync_state: row.get(11)?,
+            is_placeholder: row.get(12)?,
+            is_directory: row.get(13)?,
+            hydration_state: row.get(14)?,
+            pin_state: row.get(15)?,
+            lock_state: row.get(16)?,
+            base_remote_version_id: row.get(17)?,
+            base_remote_modified: row.get(18)?,
+            hydration_reason: row.get(19)?,
+        })
+    }
+
+    /// Full column list for file_entries (post-migration).
+    const FILE_ENTRY_SELECT: &'static str = "
+        SELECT id, sync_root_id, local_relative_path, cloud_item_id, cloud_version_id,
+               cloud_storage_urn, local_hash, cloud_hash, file_size,
+               last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory,
+               hydration_state, pin_state, lock_state, base_remote_version_id, base_remote_modified, hydration_reason";
 
     pub fn get_file_entry_by_path(
         &self,
         sync_root_id: &str,
         relative_path: &str,
     ) -> Result<Option<FileEntryRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, sync_root_id, local_relative_path, cloud_item_id, cloud_version_id,
-                    cloud_storage_urn, local_hash, cloud_hash, file_size,
-                    last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory
-             FROM file_entries
-             WHERE sync_root_id = ?1 AND local_relative_path = ?2",
-        )?;
+        let sql = format!(
+            "{} FROM file_entries WHERE sync_root_id = ?1 AND local_relative_path = ?2",
+            Self::FILE_ENTRY_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(rusqlite::params![sync_root_id, relative_path], |row| {
-            Ok(FileEntryRow {
-                id: row.get(0)?,
-                sync_root_id: row.get(1)?,
-                local_relative_path: row.get(2)?,
-                cloud_item_id: row.get(3)?,
-                cloud_version_id: row.get(4)?,
-                cloud_storage_urn: row.get(5)?,
-                local_hash: row.get(6)?,
-                cloud_hash: row.get(7)?,
-                file_size: row.get(8)?,
-                last_local_modified: row.get(9)?,
-                last_cloud_modified: row.get(10)?,
-                sync_state: row.get(11)?,
-                is_placeholder: row.get(12)?,
-                is_directory: row.get(13)?,
-            })
+            Self::map_file_entry(row)
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn get_file_entry_by_cloud_item(
+        &self,
+        sync_root_id: &str,
+        cloud_item_id: &str,
+    ) -> Result<Option<FileEntryRow>> {
+        let sql = format!(
+            "{} FROM file_entries WHERE sync_root_id = ?1 AND cloud_item_id = ?2",
+            Self::FILE_ENTRY_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query_map(rusqlite::params![sync_root_id, cloud_item_id], |row| {
+            Self::map_file_entry(row)
         })?;
         Ok(rows.next().transpose()?)
     }
 
     pub fn get_all_file_entries(&self, sync_root_id: &str) -> Result<Vec<FileEntryRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, sync_root_id, local_relative_path, cloud_item_id, cloud_version_id,
-                    cloud_storage_urn, local_hash, cloud_hash, file_size,
-                    last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory
-             FROM file_entries WHERE sync_root_id = ?1",
+        let sql = format!(
+            "{} FROM file_entries WHERE sync_root_id = ?1",
+            Self::FILE_ENTRY_SELECT
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![sync_root_id], |row| Self::map_file_entry(row))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_hydration_state(
+        &self,
+        sync_root_id: &str,
+        relative_path: &str,
+        hydration_state: &str,
+        is_placeholder: bool,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE file_entries SET hydration_state = ?1, is_placeholder = ?2, hydration_reason = ?3
+             WHERE sync_root_id = ?4 AND local_relative_path = ?5",
+            rusqlite::params![
+                hydration_state,
+                if is_placeholder { 1 } else { 0 },
+                reason,
+                sync_root_id,
+                relative_path
+            ],
         )?;
-        let rows = stmt.query_map(rusqlite::params![sync_root_id], |row| {
-            Ok(FileEntryRow {
+        Ok(())
+    }
+
+    pub fn update_base_remote_version(
+        &self,
+        sync_root_id: &str,
+        relative_path: &str,
+        version_id: &str,
+        cloud_modified: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE file_entries SET base_remote_version_id = ?1, base_remote_modified = ?2, cloud_version_id = ?1
+             WHERE sync_root_id = ?3 AND local_relative_path = ?4",
+            rusqlite::params![version_id, cloud_modified, sync_root_id, relative_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_pin_state(&self, sync_root_id: &str, relative_path: &str, pinned: bool) -> Result<()> {
+        let pin = if pinned { 1 } else { 0 };
+        self.conn.execute(
+            "UPDATE file_entries SET pin_state = ?1,
+                 hydration_state = CASE WHEN ?1 = 1 THEN 'hydrated_pinned' ELSE hydration_state END
+             WHERE sync_root_id = ?2 AND local_relative_path = ?3",
+            rusqlite::params![pin, sync_root_id, relative_path],
+        )?;
+        Ok(())
+    }
+
+    // ── Inventor IPJ ──
+
+    pub fn set_inventor_ipj(&self, sync_root_id: &str, ipj_path: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO inventor_project_context (sync_root_id, ipj_path, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(sync_root_id) DO UPDATE SET ipj_path = excluded.ipj_path, updated_at = datetime('now')",
+            rusqlite::params![sync_root_id, ipj_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_inventor_ipj(&self, sync_root_id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ipj_path FROM inventor_project_context WHERE sync_root_id = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![sync_root_id], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    // ── Pending jobs (troubleshooter / bulk delete) ──
+
+    pub fn insert_pending_job(
+        &self,
+        sync_root_id: &str,
+        job_type: &str,
+        payload_json: Option<&str>,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO pending_jobs (id, sync_root_id, job_type, payload_json, status)
+             VALUES (?1, ?2, ?3, ?4, 'queued')",
+            rusqlite::params![id, sync_root_id, job_type, payload_json],
+        )?;
+        Ok(id)
+    }
+
+    pub fn list_pending_jobs(&self, status: &str, limit: usize) -> Result<Vec<PendingJobRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sync_root_id, job_type, payload_json, status, details, created_at
+             FROM pending_jobs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![status, limit], |row| {
+            Ok(PendingJobRow {
                 id: row.get(0)?,
                 sync_root_id: row.get(1)?,
-                local_relative_path: row.get(2)?,
-                cloud_item_id: row.get(3)?,
-                cloud_version_id: row.get(4)?,
-                cloud_storage_urn: row.get(5)?,
-                local_hash: row.get(6)?,
-                cloud_hash: row.get(7)?,
-                file_size: row.get(8)?,
-                last_local_modified: row.get(9)?,
-                last_cloud_modified: row.get(10)?,
-                sync_state: row.get(11)?,
-                is_placeholder: row.get(12)?,
-                is_directory: row.get(13)?,
+                job_type: row.get(2)?,
+                payload_json: row.get(3)?,
+                status: row.get(4)?,
+                details: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -234,6 +375,8 @@ pub struct SyncRootRow {
     pub local_path: String,
     pub display_name: String,
     pub last_full_sync: Option<String>,
+    pub delete_prompt_pending: bool,
+    pub last_poll_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +395,23 @@ pub struct FileEntryRow {
     pub sync_state: String,
     pub is_placeholder: bool,
     pub is_directory: bool,
+    pub hydration_state: String,
+    pub pin_state: i64,
+    pub lock_state: String,
+    pub base_remote_version_id: Option<String>,
+    pub base_remote_modified: Option<String>,
+    pub hydration_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingJobRow {
+    pub id: String,
+    pub sync_root_id: String,
+    pub job_type: String,
+    pub payload_json: Option<String>,
+    pub status: String,
+    pub details: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -264,4 +424,31 @@ pub struct ActivityLogRow {
     pub status: String,
     pub details: Option<String>,
     pub bytes_transferred: Option<i64>,
+}
+
+impl Default for FileEntryRow {
+    fn default() -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            sync_root_id: String::new(),
+            local_relative_path: String::new(),
+            cloud_item_id: None,
+            cloud_version_id: None,
+            cloud_storage_urn: None,
+            local_hash: None,
+            cloud_hash: None,
+            file_size: None,
+            last_local_modified: None,
+            last_cloud_modified: None,
+            sync_state: "unknown".into(),
+            is_placeholder: true,
+            is_directory: false,
+            hydration_state: "online_only".into(),
+            pin_state: 0,
+            lock_state: "none".into(),
+            base_remote_version_id: None,
+            base_remote_modified: None,
+            hydration_reason: None,
+        }
+    }
 }

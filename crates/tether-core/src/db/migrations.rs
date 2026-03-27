@@ -6,7 +6,111 @@ use tracing::info;
 pub fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_SQL)
         .context("Failed to run database migrations")?;
+    migrate_file_entries_v2(conn)?;
+    migrate_sync_roots_v2(conn)?;
+    migrate_aux_tables(conn)?;
     info!("Database schema is up to date");
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, name: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    while let Some(r) = rows.next().transpose()? {
+        if r == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    name: &str,
+    ddl: &str,
+) -> Result<()> {
+    if !column_exists(conn, table, name)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {ddl};"))
+            .with_context(|| format!("ALTER TABLE {table} ADD {name}"))?;
+        info!("Migration: added column {table}.{name}");
+    }
+    Ok(())
+}
+
+/// Add Desktop Connector parity columns to existing databases.
+fn migrate_file_entries_v2(conn: &Connection) -> Result<()> {
+    add_column_if_missing(
+        conn,
+        "file_entries",
+        "hydration_state",
+        "hydration_state TEXT NOT NULL DEFAULT 'online_only'",
+    )?;
+    add_column_if_missing(conn, "file_entries", "pin_state", "pin_state INTEGER NOT NULL DEFAULT 0")?;
+    add_column_if_missing(
+        conn,
+        "file_entries",
+        "lock_state",
+        "lock_state TEXT NOT NULL DEFAULT 'none'",
+    )?;
+    add_column_if_missing(
+        conn,
+        "file_entries",
+        "base_remote_version_id",
+        "base_remote_version_id TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "file_entries",
+        "base_remote_modified",
+        "base_remote_modified TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "file_entries",
+        "hydration_reason",
+        "hydration_reason TEXT",
+    )?;
+    Ok(())
+}
+
+fn migrate_sync_roots_v2(conn: &Connection) -> Result<()> {
+    add_column_if_missing(
+        conn,
+        "sync_roots",
+        "delete_prompt_pending",
+        "delete_prompt_pending INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        conn,
+        "sync_roots",
+        "last_poll_at",
+        "last_poll_at TEXT",
+    )?;
+    Ok(())
+}
+
+fn migrate_aux_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS pending_jobs (
+    id TEXT PRIMARY KEY,
+    sync_root_id TEXT NOT NULL REFERENCES sync_roots(id),
+    job_type TEXT NOT NULL,
+    payload_json TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    details TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pending_jobs_status ON pending_jobs(status);
+
+CREATE TABLE IF NOT EXISTS inventor_project_context (
+    sync_root_id TEXT PRIMARY KEY REFERENCES sync_roots(id),
+    ipj_path TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#,
+    )?;
     Ok(())
 }
 

@@ -106,6 +106,9 @@ pub struct ItemAttributes {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ItemRelationships {
     pub tip: Option<RelationshipData>,
+    /// Parent folder (present on single-item GET).
+    #[serde(default)]
+    pub parent: Option<RelationshipData>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +139,9 @@ pub struct VersionAttributes {
     #[serde(rename = "lastModifiedTime")]
     pub last_modified_time: Option<String>,
     pub name: Option<String>,
+    /// Present on many file versions; used when item-level `storageSize` is missing.
+    #[serde(rename = "storageSize", default)]
+    pub storage_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

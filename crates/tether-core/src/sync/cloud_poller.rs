@@ -78,6 +78,11 @@ pub async fn start_polling(
 
                     match existing {
                         Some(entry) => {
+                            // Desktop Connector parity: do not pull remote updates for online-only
+                            // files until the user has hydrated them once or pinned them.
+                            if entry.hydration_state == "online_only" && entry.pin_state == 0 {
+                                continue;
+                            }
                             // Compare timestamps
                             if let Some(ref cloud_time) = item.attributes.last_modified_time {
                                 if entry.last_cloud_modified.as_deref() != Some(cloud_time.as_str()) {
@@ -89,10 +94,9 @@ pub async fn start_polling(
                             }
                         }
                         None => {
-                            let _ = tx.try_send(CloudChange::Added {
-                                cloud_item_id: item.id.clone(),
-                                display_name: display_name.clone(),
-                            });
+                            // New cloud item: placeholders are populated via CFAPI `fetch_placeholders`;
+                            // avoid bulk pre-download here (on-demand open / Sync Now instead).
+                            let _ = display_name;
                         }
                     }
                 }

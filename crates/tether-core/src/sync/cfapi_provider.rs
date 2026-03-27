@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::mpsc::UnboundedSender;
 
 use anyhow::{Context, Result};
 use tether_cfapi::{CloudFileInfo, CloudProvider};
@@ -15,6 +17,11 @@ use tokio::runtime::Handle;
 use crate::api::auth::ApsAuthClient;
 use crate::api::data_management::ApsDataManagementClient;
 use crate::api::storage::ApsStorageClient;
+use crate::db::database::SyncDatabase;
+
+fn normalize_rel(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
 
 /// Concrete CloudProvider backed by APS REST APIs.
 pub struct ApsCloudProvider {
@@ -26,6 +33,9 @@ pub struct ApsCloudProvider {
     /// Maps local relative paths (from sync root) → cloud folder IDs.
     /// The root folder ("") is inserted at construction time.
     folder_map: Mutex<HashMap<PathBuf, String>>,
+    state_db: Option<Arc<Mutex<SyncDatabase>>>,
+    sync_root_id: Option<String>,
+    upload_tx: UnboundedSender<(PathBuf, String)>,
 }
 
 impl ApsCloudProvider {
@@ -36,6 +46,9 @@ impl ApsCloudProvider {
         storage: ApsStorageClient,
         project_id: String,
         root_folder_id: String,
+        state_db: Option<Arc<Mutex<SyncDatabase>>>,
+        sync_root_id: Option<String>,
+        upload_tx: UnboundedSender<(PathBuf, String)>,
     ) -> Self {
         let mut map = HashMap::new();
         // Empty path = the sync root itself
@@ -48,6 +61,9 @@ impl ApsCloudProvider {
             storage,
             project_id,
             folder_map: Mutex::new(map),
+            state_db,
+            sync_root_id,
+            upload_tx,
         }
     }
 }
@@ -64,24 +80,34 @@ impl CloudProvider for ApsCloudProvider {
                 .get_folder_contents(&token, &self.project_id, cloud_folder_id),
         )?;
 
-        Ok(items
-            .into_iter()
-            .map(|item| {
-                let is_directory = item.item_type == "folders";
-                CloudFileInfo {
-                    name: item.attributes.display_name,
-                    is_directory,
-                    size: if is_directory {
-                        0
-                    } else {
-                        item.attributes.storage_size.unwrap_or(0)
-                    },
-                    cloud_id: item.id,
-                    last_modified: item.attributes.last_modified_time,
-                    created: item.attributes.create_time,
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let is_directory = item.item_type == "folders";
+            let mut size = if is_directory {
+                0
+            } else {
+                item.attributes.storage_size.unwrap_or(0)
+            };
+            if !is_directory && size == 0 {
+                if let Ok(versions) = self.runtime.block_on(
+                    self.data_mgmt
+                        .get_item_versions(&token, &self.project_id, &item.id),
+                ) {
+                    if let Some(v) = versions.first() {
+                        size = v.attributes.storage_size.unwrap_or(0);
+                    }
                 }
-            })
-            .collect())
+            }
+            out.push(CloudFileInfo {
+                name: item.attributes.display_name,
+                is_directory,
+                size,
+                cloud_id: item.id,
+                last_modified: item.attributes.last_modified_time,
+                created: item.attributes.create_time,
+            });
+        }
+        Ok(out)
     }
 
     fn download_file_content(&self, cloud_item_id: &str) -> Result<Vec<u8>> {
@@ -219,6 +245,37 @@ impl CloudProvider for ApsCloudProvider {
                 new_relative
             );
         }
+        Ok(())
+    }
+
+    fn queue_upload_if_dirty(&self, local_full_path: PathBuf, cloud_item_id: &str) -> Result<()> {
+        self.upload_tx
+            .send((local_full_path, cloud_item_id.to_string()))
+            .map_err(|e| anyhow::anyhow!("upload channel closed: {e}"))
+    }
+
+    fn on_hydration_complete(&self, cloud_item_id: &str, relative_path: &Path) -> Result<()> {
+        let (db, root_id) = match (&self.state_db, &self.sync_root_id) {
+            (Some(db), Some(rid)) => (db, rid.as_str()),
+            _ => return Ok(()),
+        };
+        let rel = normalize_rel(relative_path);
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        db.update_hydration_state(
+            root_id,
+            &rel,
+            "hydrated_ephemeral",
+            false,
+            Some("opened"),
+        )?;
+        db.log_activity(
+            "hydrate",
+            Some(&rel),
+            Some(cloud_item_id),
+            "success",
+            None,
+            None,
+        )?;
         Ok(())
     }
 }

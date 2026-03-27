@@ -3,7 +3,7 @@
 //! tether-core implements this trait with real APS API clients;
 //! tether-cfapi consumes it inside SyncFilter callbacks.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Metadata for a single cloud file or folder returned by directory listing.
 #[derive(Debug, Clone)]
@@ -65,4 +65,23 @@ pub trait CloudProvider: Send + Sync {
         old_relative: &Path,
         new_relative: &Path,
     ) -> anyhow::Result<()>;
+
+    /// After a placeholder is fully hydrated in [`crate::filter::TetherSyncFilter::fetch_data`].
+    fn on_hydration_complete(
+        &self,
+        _cloud_item_id: &str,
+        _relative_path: &Path,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Called when a file handle closes and the placeholder is not in sync (local edits).
+    /// Default: no-op (tests / stubs).
+    fn queue_upload_if_dirty(
+        &self,
+        _local_full_path: PathBuf,
+        _cloud_item_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

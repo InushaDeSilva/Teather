@@ -1,7 +1,13 @@
+use std::path::Path;
+
 use serde::Serialize;
 use tauri::State;
 
 use tether_core::sync::engine::SyncStatus;
+use tether_core::sync::reference;
+use tether_core::sync::task::{QueueJobView, SyncOperation, SyncPriority, SyncTask};
+use tether_core::sync::urls;
+
 use crate::state::AppState;
 
 // ── Response types ──
@@ -10,6 +16,8 @@ use crate::state::AppState;
 pub struct SyncStatusResponse {
     pub status: SyncStatus,
     pub queued_count: usize,
+    /// In-memory worker queue (upload/download jobs not yet finished).
+    pub queue_jobs: Vec<QueueJobView>,
 }
 
 #[derive(Serialize)]
@@ -40,6 +48,21 @@ pub struct DriveItemInfo {
     pub depth: u32,
 }
 
+#[derive(Serialize)]
+pub struct SyncSessionInfo {
+    pub hub_id: Option<String>,
+    pub project_id: Option<String>,
+    pub folder_id: Option<String>,
+    pub sync_root_path: Option<String>,
+    pub sync_root_db_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TroubleshooterReport {
+    pub activity_lines: Vec<String>,
+    pub pending_job_summaries: Vec<String>,
+}
+
 
 // ── Commands ──
 
@@ -47,9 +70,11 @@ pub struct DriveItemInfo {
 pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusResponse, String> {
     let engine = state.engine.lock().await;
     let queued = engine.queue.len().await;
+    let queue_jobs = engine.queue.snapshot_queue_views().await;
     Ok(SyncStatusResponse {
         status: engine.current_status(),
         queued_count: queued,
+        queue_jobs,
     })
 }
 
@@ -236,5 +261,222 @@ pub async fn start_sync(
     let mut engine = state.engine.lock().await;
     engine.start(&hub_id, &project_id, &project_name, folder_id).await.map_err(|e| format!("{e:#}"))?;
     Ok(())
+}
+
+// ── Desktop Connector parity helpers ──
+
+#[tauri::command]
+pub async fn get_sync_session(state: State<'_, AppState>) -> Result<SyncSessionInfo, String> {
+    let engine = state.engine.lock().await;
+    Ok(SyncSessionInfo {
+        hub_id: engine.current_hub_id.clone(),
+        project_id: engine.current_project_id.clone(),
+        folder_id: engine.current_root_folder_id.clone(),
+        sync_root_path: engine
+            .sync_root_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
+        sync_root_db_id: engine.sync_root_db_id.clone(),
+    })
+}
+
+#[tauri::command]
+pub async fn get_view_online_url(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<String, String> {
+    let engine = state.engine.lock().await;
+    let pid = engine
+        .current_project_id
+        .as_ref()
+        .ok_or_else(|| "No active project".to_string())?;
+    let fid = engine
+        .current_root_folder_id
+        .as_ref()
+        .ok_or_else(|| "No active folder".to_string())?;
+    Ok(urls::acc_view_item_url(pid, fid, &item_id))
+}
+
+#[tauri::command]
+pub async fn get_copy_link(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> Result<String, String> {
+    get_view_online_url(state, item_id).await
+}
+
+#[tauri::command]
+pub async fn sync_now(
+    state: State<'_, AppState>,
+    relative_path: String,
+) -> Result<String, String> {
+    let (root, sr_id, queue, jobs) = {
+        let engine = state.engine.lock().await;
+        let root = engine.sync_root_path.clone().ok_or_else(|| "No sync root".to_string())?;
+        let sr_id = engine
+            .sync_root_db_id
+            .clone()
+            .ok_or_else(|| "No sync root id".to_string())?;
+        let queue = engine.queue.clone();
+        let host_full = root.join(&relative_path);
+        let data = tokio::fs::read(&host_full).await.map_err(|e| e.to_string())?;
+        let refs = reference::parse_inventor_references(&data);
+        let rel_path = Path::new(&relative_path);
+        let mut paths = vec![host_full];
+        paths.extend(reference::prefetch_closure_paths(rel_path, &root, &refs));
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        let mut jobs = Vec::new();
+        for p in paths {
+            let rel = p
+                .strip_prefix(&root)
+                .map(|x| x.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if let Ok(Some(entry)) = db.get_file_entry_by_path(&sr_id, &rel) {
+                if let Some(cid) = entry.cloud_item_id {
+                    jobs.push((p, cid));
+                }
+            }
+        }
+        (root, sr_id, queue, jobs)
+    };
+
+    let mut n = 0usize;
+    for (local_path, cid) in jobs {
+        let mut task = SyncTask::new(
+            SyncOperation::Download,
+            SyncPriority::Critical,
+            local_path,
+        );
+        task.cloud_item_id = Some(cid);
+        task.sync_root_id = Some(sr_id.clone());
+        task.sync_root_path = Some(root.clone());
+        queue.push(task).await;
+        n += 1;
+    }
+    Ok(format!("Queued {n} download task(s) for reference closure"))
+}
+
+#[tauri::command]
+pub async fn set_always_keep_on_device(
+    state: State<'_, AppState>,
+    relative_path: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let engine = state.engine.lock().await;
+    let sr = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let rel = relative_path.replace('\\', "/");
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.set_pin_state(sr, &rel, pinned)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn free_up_space(
+    state: State<'_, AppState>,
+    relative_path: String,
+) -> Result<(), String> {
+    let engine = state.engine.lock().await;
+    let root = engine
+        .sync_root_path
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let sr = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let rel = relative_path.replace('\\', "/");
+    {
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        if let Ok(Some(entry)) = db.get_file_entry_by_path(sr, &rel) {
+            if entry.pin_state != 0 {
+                return Err("Item is pinned (Always keep on this device); cannot free space.".into());
+            }
+        }
+    }
+    let full = root.join(&relative_path);
+    tether_cfapi::dehydrate_placeholder_file(&full).map_err(|e| e.to_string())?;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.update_hydration_state(sr, &rel, "online_only", true, None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_inventor_ipj(
+    state: State<'_, AppState>,
+    ipj_path: Option<String>,
+) -> Result<(), String> {
+    let engine = state.engine.lock().await;
+    let sr = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.set_inventor_ipj(sr, ipj_path.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_inventor_ipj(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let engine = state.engine.lock().await;
+    let sr = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.get_inventor_ipj(sr).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn collect_diagnostics_bundle(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let _ = state;
+    let out = std::env::temp_dir().join(format!(
+        "tether-diagnostics-{}.zip",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+    tether_core::sync::diagnostics::collect_diagnostics_bundle(&out).map_err(|e| e.to_string())?;
+    Ok(out.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn get_troubleshooter_report(
+    state: State<'_, AppState>,
+) -> Result<TroubleshooterReport, String> {
+    let engine = state.engine.lock().await;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    let activity = db
+        .get_recent_activity(40)
+        .map_err(|e| e.to_string())?;
+    let activity_lines: Vec<String> = activity
+        .iter()
+        .map(|a| {
+            format!(
+                "{}: {} [{}] {} — {}",
+                a.timestamp,
+                a.operation,
+                a.status,
+                a.file_path.as_deref().unwrap_or("-"),
+                a.details.as_deref().unwrap_or("")
+            )
+        })
+        .collect();
+    let pending = db
+        .list_pending_jobs("queued", 20)
+        .map_err(|e| e.to_string())?;
+    let pending_job_summaries: Vec<String> = pending
+        .iter()
+        .map(|j| format!("{}: {} ({})", j.id, j.job_type, j.status))
+        .collect();
+    Ok(TroubleshooterReport {
+        activity_lines,
+        pending_job_summaries,
+    })
 }
 

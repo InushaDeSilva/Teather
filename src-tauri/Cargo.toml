@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 tether-core = { path = "../crates/tether-core" }
+tether-cfapi = { path = "../crates/tether-cfapi" }
 
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-positioner = "2"

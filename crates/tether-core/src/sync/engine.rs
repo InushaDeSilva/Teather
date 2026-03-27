@@ -34,6 +34,11 @@ pub struct SyncEngine {
     pub queue: Arc<SyncQueue>,
     pub status: SyncStatus,
     pub sync_root_path: Option<PathBuf>,
+    /// Row id in `sync_roots` for the active session.
+    pub sync_root_db_id: Option<String>,
+    pub current_hub_id: Option<String>,
+    pub current_project_id: Option<String>,
+    pub current_root_folder_id: Option<String>,
     pub cf_connection: Option<tether_cfapi::Connection<tether_cfapi::TetherSyncFilter>>,
     paused: bool,
 }
@@ -60,6 +65,10 @@ impl SyncEngine {
             queue,
             status: SyncStatus::Idle,
             sync_root_path: None,
+            sync_root_db_id: None,
+            current_hub_id: None,
+            current_project_id: None,
+            current_root_folder_id: None,
             cf_connection: None,
             paused: false,
         })
@@ -130,6 +139,39 @@ impl SyncEngine {
             root_folder.id.clone()
         };
 
+        let sync_root_db_id = {
+            let db = self.db.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+            db.insert_sync_root(
+                hub_id,
+                project_id,
+                &root_folder_id,
+                sync_root.to_str().unwrap_or("."),
+                project_name,
+            )?
+        };
+        self.sync_root_db_id = Some(sync_root_db_id.clone());
+        self.current_hub_id = Some(hub_id.to_string());
+        self.current_project_id = Some(project_id.to_string());
+        self.current_root_folder_id = Some(root_folder_id.clone());
+
+        let (upload_tx, mut upload_rx) = tokio::sync::mpsc::unbounded_channel();
+        let queue_upload = self.queue.clone();
+        let root_upload = sync_root.clone();
+        let sr_upload = sync_root_db_id.clone();
+        tokio::spawn(async move {
+            while let Some((path, item_id)) = upload_rx.recv().await {
+                let mut task = super::task::SyncTask::new(
+                    super::task::SyncOperation::Upload,
+                    super::task::SyncPriority::High,
+                    path,
+                );
+                task.cloud_item_id = Some(item_id);
+                task.sync_root_id = Some(sr_upload.clone());
+                task.sync_root_path = Some(root_upload.clone());
+                queue_upload.push(task).await;
+            }
+        });
+
         // ── Build the CloudProvider for CFAPI callbacks ──
         let provider = std::sync::Arc::new(super::cfapi_provider::ApsCloudProvider::new(
             tokio::runtime::Handle::current(),
@@ -138,6 +180,9 @@ impl SyncEngine {
             self.storage.clone(),
             project_id.to_string(),
             root_folder_id.clone(),
+            Some(self.db.clone()),
+            Some(sync_root_db_id.clone()),
+            upload_tx,
         ));
 
         // ── Register and connect the Windows Cloud Files virtual drive ──
@@ -168,6 +213,7 @@ impl SyncEngine {
             let db_clone = self.db.clone();
             let pid = project_id.to_string();
             let fid = root_folder_id;
+            let poll_root_id = sync_root_db_id.clone();
 
             tokio::spawn(async move {
                 super::cloud_poller::start_polling(
@@ -177,13 +223,14 @@ impl SyncEngine {
                     move || auth_clone.get_access_token().map_err(|e| anyhow::anyhow!("{e}")),
                     pid,
                     fid,
-                    "root".to_string(),
+                    poll_root_id,
                     tx,
                 ).await;
             });
 
             let queue_clone = self.queue.clone();
             let root_clone = sync_root;
+            let sr_id = sync_root_db_id.clone();
             tokio::spawn(async move {
                 while let Some(change) = rx.recv().await {
                     match change {
@@ -195,15 +242,19 @@ impl SyncEngine {
                                 root_clone.join(&display_name),
                             );
                             task.cloud_item_id = Some(cloud_item_id);
+                            task.sync_root_id = Some(sr_id.clone());
+                            task.sync_root_path = Some(root_clone.clone());
                             queue_clone.push(task).await;
                         }
                         super::cloud_poller::CloudChange::Removed { cloud_item_id, local_relative_path } => {
                             let mut task = super::task::SyncTask::new(
                                 super::task::SyncOperation::Delete,
                                 super::task::SyncPriority::Normal,
-                                root_clone.join(local_relative_path),
+                                root_clone.join(&local_relative_path),
                             );
                             task.cloud_item_id = Some(cloud_item_id);
+                            task.sync_root_id = Some(sr_id.clone());
+                            task.sync_root_path = Some(root_clone.clone());
                             queue_clone.push(task).await;
                         }
                     }

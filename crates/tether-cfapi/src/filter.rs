@@ -3,6 +3,7 @@
 use cloud_filter::error::CloudErrorKind;
 use cloud_filter::filter::{info, ticket, Request, SyncFilter};
 use cloud_filter::metadata::Metadata;
+use cloud_filter::placeholder::Placeholder;
 use cloud_filter::placeholder_file::PlaceholderFile;
 use cloud_filter::utility::WriteAt;
 use std::path::PathBuf;
@@ -139,10 +140,12 @@ impl SyncFilter for TetherSyncFilter {
         let blob = request.file_blob();
         let cloud_item_id = std::str::from_utf8(blob).unwrap_or("").to_string();
 
+        let full_path = request.path();
+
         if cloud_item_id.is_empty() {
             tracing::error!(
                 "fetch_data: no cloud item ID in blob for {}",
-                request.path().display()
+                full_path.display()
             );
             return Err(CloudErrorKind::InvalidRequest);
         }
@@ -151,7 +154,7 @@ impl SyncFilter for TetherSyncFilter {
         let required_range = info.required_file_range();
 
         tracing::info!(
-            "fetch_data: item={}, size={}, range={}..{}",
+            "fetch_data: item={}, logical_size={}, required_range={}..{}",
             cloud_item_id,
             file_size,
             required_range.start,
@@ -159,7 +162,7 @@ impl SyncFilter for TetherSyncFilter {
         );
 
         // Download the file content from cloud storage
-        let data = match self.provider.download_file_content(&cloud_item_id) {
+        let mut data = match self.provider.download_file_content(&cloud_item_id) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(
@@ -171,22 +174,94 @@ impl SyncFilter for TetherSyncFilter {
             }
         };
 
-        // Write the full file to the placeholder.
-        // write_at requires 4KB alignment OR ending at the logical file size.
-        // Writing the entire file from offset 0 satisfies this (ends at file size).
-        ticket.write_at(&data, 0).map_err(|e| {
+        let fs = file_size as usize;
+        if fs == 0 {
+            if data.is_empty() {
+                let _ = ticket.report_progress(0, 0);
+                let rel = match full_path.strip_prefix(&self.root_path) {
+                    Ok(p) => p,
+                    Err(_) => full_path.as_path(),
+                };
+                let _ = self.provider.on_hydration_complete(&cloud_item_id, rel);
+                return Ok(());
+            }
+            tracing::error!(
+                "fetch_data: placeholder size is 0 but download is {} bytes — fix folder listing metadata for {}",
+                data.len(),
+                full_path.display()
+            );
+            return Err(CloudErrorKind::InvalidRequest);
+        }
+
+        // Placeholder logical size must match bytes we materialize. If APS metadata was smaller
+        // than the real OSS object, truncate; if larger, fail (would yield corrupt CAD files and
+        // errors like Inventor "The database in … could not be opened").
+        if data.len() > fs {
+            tracing::warn!(
+                "fetch_data: download {} bytes > placeholder logical {} — truncating for {}",
+                data.len(),
+                fs,
+                full_path.display()
+            );
+            data.truncate(fs);
+        } else if data.len() < fs {
+            tracing::error!(
+                "fetch_data: download {} bytes < placeholder logical {} — refusing corrupt hydration for {}",
+                data.len(),
+                fs,
+                full_path.display()
+            );
+            return Err(CloudErrorKind::InvalidRequest);
+        }
+
+        // Write only the range Windows requested (may be full file or a chunk).
+        let start = required_range.start as usize;
+        let end = (required_range.end as usize).min(data.len());
+        if start >= end {
+            tracing::error!(
+                "fetch_data: invalid required range {}..{} for {}",
+                start,
+                end,
+                full_path.display()
+            );
+            return Err(CloudErrorKind::InvalidRequest);
+        }
+
+        let write_res = if start == 0 && end == data.len() {
+            ticket.write_at(&data, 0)
+        } else {
+            ticket.write_at(&data[start..end], required_range.start)
+        };
+
+        write_res.map_err(|e| {
             tracing::error!("ticket.write_at failed: {}", e);
             CloudErrorKind::InvalidRequest
         })?;
 
-        // Report completion progress
-        let _ = ticket.report_progress(file_size, data.len() as u64);
+        let _ = ticket.report_progress(file_size, end as u64);
 
         tracing::info!(
-            "fetch_data: hydrated {} ({} bytes)",
+            "fetch_data: wrote range {}..{} of {} ({} bytes logical) for {}",
+            start,
+            end,
             cloud_item_id,
-            data.len()
+            data.len(),
+            full_path.display()
         );
+
+        // Only notify after the last chunk — otherwise DB/state thinks the file is complete early.
+        if end == fs {
+            let rel = match full_path.strip_prefix(&self.root_path) {
+                Ok(p) => p,
+                Err(_) => full_path.as_path(),
+            };
+            if let Err(e) = self
+                .provider
+                .on_hydration_complete(&cloud_item_id, rel)
+            {
+                tracing::warn!("on_hydration_complete failed: {}", e);
+            }
+        }
 
         Ok(())
     }
@@ -296,5 +371,54 @@ impl SyncFilter for TetherSyncFilter {
             tracing::error!("ticket.pass rename: {:?}", e);
             CloudErrorKind::InvalidRequest
         })
+    }
+
+    /// Last handle closed — if the file was modified locally, enqueue upload so Explorer clears "Sync pending".
+    fn closed(&self, request: Request, info: info::Closed) {
+        if info.deleted() {
+            return;
+        }
+        let path = request.path();
+        if path.is_dir() {
+            return;
+        }
+        let blob = request.file_blob();
+        let cloud_id = std::str::from_utf8(blob).unwrap_or("").trim();
+        if cloud_id.is_empty() {
+            return;
+        }
+        let ph = match Placeholder::open(&path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(
+                    "closed: skip open {}: {:?}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+        let in_sync = match ph.info() {
+            Ok(Some(pi)) => pi.is_in_sync(),
+            Ok(None) => return,
+            Err(e) => {
+                tracing::debug!("closed: info {}: {:?}", path.display(), e);
+                return;
+            }
+        };
+        if in_sync {
+            return;
+        }
+        tracing::info!(
+            "closed: local edits pending sync → queue upload {} (item={})",
+            path.display(),
+            cloud_id
+        );
+        if let Err(e) = self
+            .provider
+            .queue_upload_if_dirty(path.to_path_buf(), cloud_id)
+        {
+            tracing::warn!("closed: queue_upload_if_dirty failed: {e:#}");
+        }
     }
 }

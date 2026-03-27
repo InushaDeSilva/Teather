@@ -1,4 +1,4 @@
-//! Conflict resolution — last-write-wins with safety copy.
+//! Conflict resolution — keep-both default; **stale-base** guard for uploads.
 
 use std::path::{Path, PathBuf};
 use anyhow::Result;
@@ -38,6 +38,33 @@ pub fn conflict_path(original: &Path) -> PathBuf {
     original.with_file_name(new_name)
 }
 
+/// Result of comparing local edits to the last known remote head (stale-base detection).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleBaseOutcome {
+    /// Remote head matches what we based local work on — safe to upload.
+    SafeToUpload,
+    /// Remote has moved on and local may have diverged — do not overwrite silently.
+    StaleConflict {
+        local_base_version_id: Option<String>,
+        remote_head_version_id: String,
+    },
+}
+
+/// Before uploading, compare `remote_head_version_id` to the version the user last synced from.
+pub fn evaluate_stale_base(
+    base_remote_version_id: Option<&str>,
+    remote_head_version_id: &str,
+) -> StaleBaseOutcome {
+    match base_remote_version_id {
+        None => StaleBaseOutcome::SafeToUpload,
+        Some(base) if base == remote_head_version_id => StaleBaseOutcome::SafeToUpload,
+        Some(base) => StaleBaseOutcome::StaleConflict {
+            local_base_version_id: Some(base.to_string()),
+            remote_head_version_id: remote_head_version_id.to_string(),
+        },
+    }
+}
+
 /// Resolve a conflict according to the chosen strategy.
 /// Returns the path where the cloud version was saved (if applicable).
 pub async fn resolve_conflict(
@@ -69,6 +96,26 @@ pub async fn resolve_conflict(
                 local_path.display()
             );
             Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_base_safe_when_heads_match() {
+        let o = evaluate_stale_base(Some("v1"), "v1");
+        assert_eq!(o, StaleBaseOutcome::SafeToUpload);
+    }
+
+    #[test]
+    fn stale_base_conflict_when_remote_moved() {
+        let o = evaluate_stale_base(Some("v1"), "v2");
+        match o {
+            StaleBaseOutcome::StaleConflict { .. } => {}
+            _ => panic!("expected stale conflict"),
         }
     }
 }
