@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-use tauri::Manager;
+use tauri::{async_runtime, Manager};
 
 use tether_core::config::settings::AppSettings;
 use tether_core::sync::engine::SyncEngine;
@@ -40,7 +40,7 @@ pub fn run() {
             tray::setup_tray(app)?;
             let handle = app.handle().clone();
             let engine = app.state::<AppState>().engine.clone();
-            tokio::spawn(async move {
+            async_runtime::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(3));
                 loop {
                     tick.tick().await;

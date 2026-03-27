@@ -3,13 +3,12 @@
 use anyhow::{Context, Result};
 use oauth2::basic::BasicClient;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
-    TokenUrl,
+    AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl,
 };
 use reqwest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::api::models::TokenResponse;
 use crate::config::secure_storage;

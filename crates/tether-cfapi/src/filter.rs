@@ -293,20 +293,17 @@ impl SyncFilter for TetherSyncFilter {
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
+        // Best-effort cloud delete, then always ACK the local delete. Returning `Err` here causes
+        // cloud-filter to call `Delete::fail(..).unwrap()`, which can panic with HRESULT 0x8007018E
+        // when Windows rejects the chosen completion status.
         if info.is_directory() {
-            self.provider
-                .delete_cloud_folder_recursive(cloud_id)
-                .map_err(|e| {
-                    tracing::error!("delete_cloud_folder_recursive: {}", e);
-                    CloudErrorKind::NetworkUnavailable
-                })?;
-        } else {
-            self.provider
-                .delete_cloud_item(cloud_id, display_name)
-                .map_err(|e| {
-                    tracing::error!("delete_cloud_item: {}", e);
-                    CloudErrorKind::NetworkUnavailable
-                })?;
+            if let Err(e) = self.provider.delete_cloud_folder_recursive(cloud_id) {
+                tracing::warn!(
+                    "delete_cloud_folder_recursive failed (local delete still applied): {e:#}"
+                );
+            }
+        } else if let Err(e) = self.provider.delete_cloud_item(cloud_id, display_name) {
+            tracing::warn!("delete_cloud_item failed (local delete still applied): {e:#}");
         }
 
         ticket.pass().map_err(|e| {
@@ -398,15 +395,23 @@ impl SyncFilter for TetherSyncFilter {
                 return;
             }
         };
-        let in_sync = match ph.info() {
-            Ok(Some(pi)) => pi.is_in_sync(),
+        let info = match ph.info() {
+            Ok(Some(pi)) => pi,
             Ok(None) => return,
             Err(e) => {
                 tracing::debug!("closed: info {}: {:?}", path.display(), e);
                 return;
             }
         };
-        if in_sync {
+        if info.is_in_sync() {
+            return;
+        }
+        // Only upload when user data actually changed — avoids queueing on metadata-only / explorer noise.
+        if info.modified_data_size() <= 0 {
+            tracing::debug!(
+                "closed: out of sync but modified_data_size=0, skip upload {}",
+                path.display()
+            );
             return;
         }
         tracing::info!(

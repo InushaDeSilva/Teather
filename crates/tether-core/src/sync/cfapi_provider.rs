@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -36,6 +37,8 @@ pub struct ApsCloudProvider {
     state_db: Option<Arc<Mutex<SyncDatabase>>>,
     sync_root_id: Option<String>,
     upload_tx: UnboundedSender<(PathBuf, String)>,
+    /// Collapse duplicate `closed` callbacks for the same path (same tick).
+    upload_dedup: Mutex<HashMap<PathBuf, Instant>>,
 }
 
 impl ApsCloudProvider {
@@ -64,6 +67,7 @@ impl ApsCloudProvider {
             state_db,
             sync_root_id,
             upload_tx,
+            upload_dedup: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -249,6 +253,21 @@ impl CloudProvider for ApsCloudProvider {
     }
 
     fn queue_upload_if_dirty(&self, local_full_path: PathBuf, cloud_item_id: &str) -> Result<()> {
+        const DEBOUNCE: Duration = Duration::from_millis(400);
+        let now = Instant::now();
+        let mut map = self.upload_dedup.lock().unwrap();
+        map.retain(|_, t| now.duration_since(*t) < Duration::from_secs(60));
+        if let Some(prev) = map.get(&local_full_path) {
+            if now.duration_since(*prev) < DEBOUNCE {
+                tracing::debug!(
+                    "queue_upload_if_dirty: debounce {:?}",
+                    local_full_path
+                );
+                return Ok(());
+            }
+        }
+        map.insert(local_full_path.clone(), now);
+        drop(map);
         self.upload_tx
             .send((local_full_path, cloud_item_id.to_string()))
             .map_err(|e| anyhow::anyhow!("upload channel closed: {e}"))

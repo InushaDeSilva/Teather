@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use std::path::Path;
 use tracing::{debug, info};
+use urlencoding::encode as urlenc;
 
 use super::models::*;
 
@@ -87,17 +88,12 @@ impl ApsStorageClient {
         object_key: &str,
         file_path: &Path,
     ) -> Result<String> {
-        // Step 1: Get signed upload URL
+        // Step 1: GET signed upload URLs + uploadKey (POST with {} is finalize-only and returns "uploadKey not found").
         let url = format!(
-            "{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_key}/signeds3upload"
+            "{}/signeds3upload?parts=1&firstPart=1",
+            oss_object_base(bucket_key, object_key)
         );
-        let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(token)
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
+        let resp = self.http.get(&url).bearer_auth(token).send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -121,13 +117,12 @@ impl ApsStorageClient {
             .await
             .context("S3 upload failed")?;
 
-        // Step 3: Finalize the upload
-        let finalize_url = format!(
-            "{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_key}/signeds3upload"
-        );
+        // Step 3: Finalize the upload (POST + uploadKey, optional content-type metadata)
+        let finalize_url = format!("{}/signeds3upload", oss_object_base(bucket_key, object_key));
         self.http
             .post(&finalize_url)
             .bearer_auth(token)
+            .header("x-ads-meta-Content-Type", "application/octet-stream")
             .json(&serde_json::json!({ "uploadKey": upload_resp.upload_key }))
             .send()
             .await
@@ -150,9 +145,7 @@ impl ApsStorageClient {
         dest_path: &Path,
     ) -> Result<u64> {
         // Step 1: Get signed download URL
-        let url = format!(
-            "{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_key}/signeds3download"
-        );
+        let url = format!("{}/signeds3download", oss_object_base(bucket_key, object_key));
         let resp = self
             .http
             .get(&url)
@@ -199,9 +192,7 @@ impl ApsStorageClient {
         object_key: &str,
     ) -> Result<Vec<u8>> {
         // Step 1: Get signed download URL
-        let url = format!(
-            "{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_key}/signeds3download"
-        );
+        let url = format!("{}/signeds3download", oss_object_base(bucket_key, object_key));
         let resp = self
             .http
             .get(&url)
@@ -231,6 +222,15 @@ impl ApsStorageClient {
         debug!("Downloaded {} bytes to memory", bytes.len());
         Ok(bytes.to_vec())
     }
+}
+
+/// `{BASE_URL}/oss/v2/buckets/{bucket}/objects/{object}` with path segments percent-encoded.
+fn oss_object_base(bucket_key: &str, object_key: &str) -> String {
+    format!(
+        "{BASE_URL}/oss/v2/buckets/{}/objects/{}",
+        urlenc(bucket_key),
+        urlenc(object_key)
+    )
 }
 
 /// Parse a storage URN like "urn:adsk.objects:os.object:{bucketKey}/{objectKey}"

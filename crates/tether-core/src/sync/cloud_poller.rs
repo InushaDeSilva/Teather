@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::api::data_management::ApsDataManagementClient;
 use crate::db::database::SyncDatabase;

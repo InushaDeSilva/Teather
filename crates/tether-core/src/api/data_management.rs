@@ -353,14 +353,14 @@ impl ApsDataManagementClient {
         Ok(result.data)
     }
 
-    /// Mark a file as deleted in BIM 360 / ACC by posting a "Deleted" version.
-    /// POST /data/v1/projects/{projectId}/versions
+    /// Mark a file as deleted in BIM 360 / ACC (POST Deleted version).
+    /// JSON:API content type; attributes are extension-only (adding `name` often yields BAD_INPUT).
     pub async fn delete_item_as_deleted_version(
         &self,
         token: &str,
         project_id: &str,
         item_id: &str,
-        file_name: &str,
+        _display_name: &str,
     ) -> Result<VersionInfo> {
         let url = format!("{BASE_URL}/data/v1/projects/{project_id}/versions");
         let body = serde_json::json!({
@@ -368,7 +368,6 @@ impl ApsDataManagementClient {
             "data": {
                 "type": "versions",
                 "attributes": {
-                    "name": file_name,
                     "extension": {
                         "type": "versions:autodesk.core:Deleted",
                         "version": "1.0"
@@ -382,11 +381,14 @@ impl ApsDataManagementClient {
             }
         });
 
+        let body_str = serde_json::to_string(&body)?;
         let resp = self
             .http
             .post(&url)
             .bearer_auth(token)
-            .json(&body)
+            .header("Content-Type", "application/vnd.api+json")
+            .header("Accept", "application/vnd.api+json")
+            .body(body_str)
             .send()
             .await?;
 
