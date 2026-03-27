@@ -16,6 +16,7 @@ pub struct SyncStatusResponse {
 pub struct HubInfo {
     pub id: String,
     pub name: String,
+    pub extension_type: String,
 }
 
 #[derive(Serialize)]
@@ -43,6 +44,15 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatusRes
 }
 
 #[tauri::command]
+pub async fn check_auth_status(state: State<'_, AppState>) -> Result<bool, String> {
+    let engine = state.engine.lock().await;
+    match engine.auth.get_access_token() {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+#[tauri::command]
 pub async fn start_login(state: State<'_, AppState>) -> Result<String, String> {
     let (url, csrf, verifier, auth) = {
         let engine = state.engine.lock().await;
@@ -67,9 +77,16 @@ pub async fn get_hubs(state: State<'_, AppState>) -> Result<Vec<HubInfo>, String
     let engine = state.engine.lock().await;
     let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
     let hubs = engine.data_mgmt.get_hubs(&token).await.map_err(|e| format!("{e:#}"))?;
+    
+    for h in &hubs {
+        println!("Loaded Hub: {} (ID: {})", h.attributes.name, h.id);
+        println!("   -> Extension: {:?}", h.attributes.extension);
+    }
+    
     Ok(hubs.into_iter().map(|h| HubInfo {
         id: h.id,
         name: h.attributes.name,
+        extension_type: h.attributes.extension.map(|e| e.type_code).unwrap_or_default(),
     }).collect())
 }
 

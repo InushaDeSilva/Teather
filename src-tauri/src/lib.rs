@@ -38,6 +38,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::check_auth_status,
             commands::get_sync_status,
             commands::start_login,
             commands::get_hubs,

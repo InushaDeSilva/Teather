@@ -34,6 +34,7 @@ pub struct SyncEngine {
     pub queue: Arc<SyncQueue>,
     pub status: SyncStatus,
     pub sync_root_path: Option<PathBuf>,
+    pub cf_connection: Option<tether_cfapi::Connection<tether_cfapi::TetherSyncFilter>>,
     paused: bool,
 }
 
@@ -59,6 +60,7 @@ impl SyncEngine {
             queue,
             status: SyncStatus::Idle,
             sync_root_path: None,
+            cf_connection: None,
             paused: false,
         })
     }
@@ -96,6 +98,14 @@ impl SyncEngine {
         self.sync_root_path = Some(sync_root.clone());
         self.status = SyncStatus::Idle;
         
+        // Initialize Windows Cloud Files API Virtual Drive
+        let provider_name = format!("Tether - {}", project_name);
+        tether_cfapi::register_sync_root(&provider_name, "1.0.0", &sync_root)?;
+        
+        // Connect the message loop
+        let connection = tether_cfapi::connect_sync_root(&sync_root)?;
+        self.cf_connection = Some(connection);
+
         // Start background workers
         super::worker::start_workers(
             2,

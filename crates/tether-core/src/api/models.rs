@@ -39,6 +39,13 @@ pub struct Hub {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubAttributes {
     pub name: String,
+    pub extension: Option<HubExtension>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HubExtension {
+    #[serde(rename = "type")]
+    pub type_code: String,
 }
 
 // ── Projects ──

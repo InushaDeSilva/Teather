@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["crates/tether-cfapi",
     "crates/tether-core",
     "src-tauri",
 ]

@@ -24,10 +24,20 @@ impl ApsDataManagementClient {
     /// GET /project/v1/hubs
     pub async fn get_hubs(&self, token: &str) -> Result<Vec<Hub>> {
         let url = format!("{BASE_URL}/project/v1/hubs");
-        let resp: JsonApiListResponse<Hub> = self
-            .get_json(&url, token)
-            .await
-            .context("Failed to fetch hubs")?;
+        
+        let resp = self.http.get(&url).bearer_auth(token).send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        
+        tracing::info!("RAW HUBS RESPONSE: {}", text);
+        
+        if !status.is_success() {
+            anyhow::bail!("API request failed ({}): {}", status, text);
+        }
+        
+        let resp: JsonApiListResponse<Hub> = serde_json::from_str(&text)
+            .context("Failed to parse hubs JSON")?;
+            
         Ok(resp.data)
     }
 
