@@ -215,6 +215,7 @@ impl SyncEngine {
             let fid = root_folder_id;
             let poll_root_id = sync_root_db_id.clone();
 
+            let poll_sync_root = sync_root.clone();
             tokio::spawn(async move {
                 super::cloud_poller::start_polling(
                     30,
@@ -224,6 +225,7 @@ impl SyncEngine {
                     pid,
                     fid,
                     poll_root_id,
+                    poll_sync_root,
                     tx,
                 ).await;
             });
@@ -234,12 +236,12 @@ impl SyncEngine {
             tokio::spawn(async move {
                 while let Some(change) = rx.recv().await {
                     match change {
-                        super::cloud_poller::CloudChange::Added { cloud_item_id, display_name } |
-                        super::cloud_poller::CloudChange::Updated { cloud_item_id, display_name } => {
+                        super::cloud_poller::CloudChange::Added { cloud_item_id, local_relative_path } |
+                        super::cloud_poller::CloudChange::Updated { cloud_item_id, local_relative_path } => {
                             let mut task = super::task::SyncTask::new(
                                 super::task::SyncOperation::Download,
                                 super::task::SyncPriority::Normal,
-                                root_clone.join(&display_name),
+                                root_clone.join(&local_relative_path),
                             );
                             task.cloud_item_id = Some(cloud_item_id);
                             task.sync_root_id = Some(sr_id.clone());

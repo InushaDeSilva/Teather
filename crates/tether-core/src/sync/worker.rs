@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::path::Path;
+
 use tracing::{debug, error, info, warn};
 
 use uuid::Uuid;
@@ -38,35 +40,66 @@ pub async fn start_workers(
         tokio::spawn(async move {
             debug!("Worker {} started", i);
             loop {
-                if let Some(mut task) = q.pop().await {
-                    let token = match a.get_access_token() {
-                        Ok(t) => t,
-                        Err(e) => {
-                            warn!("Worker {} failing task {} due to auth error: {}", i, task.id, e);
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut task = match q.pop().await {
+                    Some(t) => t,
+                    None => {
+                        q.wait_for_work(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                };
+
+                let token = match a.get_access_token() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!("Worker {} task {} auth error: {} — retry later", i, task.id, e);
+                        task.not_before = Some(Instant::now() + Duration::from_secs(2));
+                        q.push(task).await;
+                        continue;
+                    }
+                };
+
+                let _upload_permit = if matches!(task.operation, SyncOperation::Upload) {
+                    match q.upload_semaphore().acquire_owned().await {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            warn!("Upload semaphore closed; re-queue task {}", task.id);
+                            task.not_before = Some(Instant::now() + Duration::from_millis(200));
                             q.push(task).await;
                             continue;
                         }
-                    };
+                    }
+                } else {
+                    None
+                };
 
-                    match process_task(&task, &token, &s, &d, &db, &p_id).await {
-                        Ok(_) => {
-                            info!("Task completed: {:?}", task.operation);
-                        }
-                        Err(e) => {
-                            error!("Task failed: {:?} - {}", task.operation, e);
-                            task.retry_count += 1;
-                            if task.retry_count < 5 {
-                                let backoff = task.backoff_duration();
-                                tokio::time::sleep(backoff).await;
-                                q.push(task).await;
-                            } else {
-                                error!("Task exceeded max retries: {:?}", task.operation);
-                            }
+                let _download_permit = if matches!(task.operation, SyncOperation::Download) {
+                    match q.download_semaphore().acquire_owned().await {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            warn!("Download semaphore closed; re-queue task {}", task.id);
+                            task.not_before = Some(Instant::now() + Duration::from_millis(200));
+                            q.push(task).await;
+                            continue;
                         }
                     }
                 } else {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    None
+                };
+
+                match process_task(&task, &token, &s, &d, &db, &p_id).await {
+                    Ok(_) => {
+                        info!("Task completed: {:?}", task.operation);
+                    }
+                    Err(e) => {
+                        error!("Task failed: {:?} - {}", task.operation, e);
+                        task.retry_count += 1;
+                        if task.retry_count < 5 {
+                            task.not_before = Some(Instant::now() + task.backoff_duration());
+                            q.push(task).await;
+                        } else {
+                            error!("Task exceeded max retries: {:?}", task.operation);
+                        }
+                    }
                 }
             }
         });
@@ -188,6 +221,7 @@ async fn process_task(
                         &task.local_path,
                     )
                     .await?;
+                    try_mark_downloaded_in_sync(&task.local_path);
                     return Ok(());
                 }
 
@@ -232,6 +266,7 @@ async fn process_task(
                     .await?;
                 }
 
+                try_mark_downloaded_in_sync(&task.local_path);
                 info!("Finished downloading item {}", item_id);
             }
         }
@@ -299,6 +334,16 @@ async fn process_task(
         }
     }
     Ok(())
+}
+
+/// Clear Explorer "Sync pending" after we wrote cloud bytes (best-effort).
+fn try_mark_downloaded_in_sync(path: &Path) {
+    if let Err(e) = tether_cfapi::mark_placeholder_in_sync(path) {
+        debug!(
+            "mark_placeholder_in_sync after download (non-fatal) {}: {e:#}",
+            path.display()
+        );
+    }
 }
 
 fn relative_under_root(root: &std::path::Path, full: &std::path::Path) -> String {

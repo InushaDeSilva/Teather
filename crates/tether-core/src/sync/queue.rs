@@ -1,16 +1,17 @@
 //! Sync queue — priority-ordered task queue with concurrency control.
 
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tracing::debug;
 
 use super::task::SyncTask;
 
 /// Wrapper to make SyncTask orderable by priority (highest first).
-struct PrioritizedTask(SyncTask);
+pub(crate) struct PrioritizedTask(pub(crate) SyncTask);
 
 impl PartialEq for PrioritizedTask {
     fn eq(&self, other: &Self) -> bool {
@@ -41,6 +42,7 @@ pub struct SyncQueue {
     queue: Mutex<BinaryHeap<PrioritizedTask>>,
     upload_semaphore: Arc<Semaphore>,
     download_semaphore: Arc<Semaphore>,
+    notify: Arc<Notify>,
 }
 
 impl SyncQueue {
@@ -49,6 +51,15 @@ impl SyncQueue {
             queue: Mutex::new(BinaryHeap::new()),
             upload_semaphore: Arc::new(Semaphore::new(max_uploads)),
             download_semaphore: Arc::new(Semaphore::new(max_downloads)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Wait until [`push`] notifies or `timeout` elapses (polling fallback).
+    pub async fn wait_for_work(&self, timeout: std::time::Duration) {
+        tokio::select! {
+            _ = self.notify.notified() => {}
+            _ = tokio::time::sleep(timeout) => {}
         }
     }
 
@@ -56,11 +67,32 @@ impl SyncQueue {
     pub async fn push(&self, task: SyncTask) {
         debug!("Queued {:?} for {}", task.operation, task.local_path.display());
         self.queue.lock().await.push(PrioritizedTask(task));
+        self.notify.notify_one();
     }
 
-    /// Pop the highest-priority task.
+    /// Pop the highest-priority task that is ready (`not_before` elapsed).
     pub async fn pop(&self) -> Option<SyncTask> {
-        self.queue.lock().await.pop().map(|p| p.0)
+        let now = Instant::now();
+        let mut q = self.queue.lock().await;
+        let mut deferred: Vec<SyncTask> = Vec::new();
+        let mut result = None;
+        while let Some(p) = q.pop() {
+            let t = p.0;
+            if t
+                .not_before
+                .map(|nb| nb > now)
+                .unwrap_or(false)
+            {
+                deferred.push(t);
+            } else {
+                result = Some(t);
+                break;
+            }
+        }
+        for t in deferred {
+            q.push(PrioritizedTask(t));
+        }
+        result
     }
 
     /// Number of tasks currently queued.
@@ -70,16 +102,12 @@ impl SyncQueue {
 
     /// Snapshot queued tasks without removing them (order is oldest-first in the returned vec).
     pub async fn snapshot_queue_views(&self) -> Vec<super::task::QueueJobView> {
-        let mut heap = self.queue.lock().await;
-        let mut temp: Vec<SyncTask> = Vec::new();
-        while let Some(p) = heap.pop() {
-            temp.push(p.0);
-        }
-        temp.sort_by_key(|t| t.queued_at);
-        let views: Vec<_> = temp.iter().map(|t| t.to_queue_view()).collect();
-        for t in temp {
-            heap.push(PrioritizedTask(t));
-        }
+        let heap = self.queue.lock().await;
+        let mut views: Vec<_> = heap
+            .iter()
+            .map(|p| p.0.to_queue_view())
+            .collect();
+        views.sort_by(|a, b| a.queued_at_rfc3339.cmp(&b.queued_at_rfc3339));
         views
     }
 

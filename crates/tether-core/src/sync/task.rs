@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -56,6 +56,8 @@ pub struct SyncTask {
     pub sync_root_id: Option<String>,
     pub sync_root_path: Option<PathBuf>,
     pub retry_count: u32,
+    /// When set, the worker must not run this task before this instant (retry / auth backoff).
+    pub not_before: Option<Instant>,
     pub queued_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub status: SyncTaskStatus,
@@ -77,6 +79,7 @@ impl SyncTask {
             sync_root_id: None,
             sync_root_path: None,
             retry_count: 0,
+            not_before: None,
             queued_at: Utc::now(),
             started_at: None,
             status: SyncTaskStatus::Queued,
