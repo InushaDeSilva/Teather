@@ -85,8 +85,17 @@ impl SyncEngine {
         info!("Sync resumed");
     }
 
-    pub async fn start(&mut self, hub_id: &str, project_id: &str, project_name: &str) -> Result<()> {
+    pub async fn start(
+        &mut self, 
+        hub_id: &str, 
+        project_id: &str, 
+        project_name: &str,
+        folder_id: Option<String>
+    ) -> Result<()> {
         info!("Starting sync for project: {} ({})", project_name, project_id);
+        if let Some(ref fid) = folder_id {
+            info!("  -> Specific folder: {}", fid);
+        }
 
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
         let sync_root = std::path::PathBuf::from(local_app_data)
@@ -98,24 +107,28 @@ impl SyncEngine {
         self.sync_root_path = Some(sync_root.clone());
         self.status = SyncStatus::Idle;
 
-        // Discover top-level folders before CFAPI registration
-        let token = self.auth.get_access_token().map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
-        let folders = self.data_mgmt.get_top_folders(&token, hub_id, project_id).await?;
+        // Use provided folder_id, or find "Project Files", or fallback to first
+        let root_folder_id = if let Some(fid) = folder_id {
+            fid
+        } else {
+            // Discover top-level folders to find a default
+            let token = self.auth.get_access_token().map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
+            let folders = self.data_mgmt.get_top_folders(&token, hub_id, project_id).await?;
 
-        info!("Found {} top-level folders for project.", folders.len());
-        for f in &folders {
-            info!(" - Folder ID: {}, Name: {}", f.id, f.attributes.display_name);
-        }
+            info!("Found {} top-level folders for project.", folders.len());
+            for f in &folders {
+                info!(" - Folder ID: {}, Name: {}", f.id, f.attributes.display_name);
+            }
 
-        // Find the "Project Files" folder or fallback to the first available
-        let project_files_folder = folders.iter().find(|f| {
-            f.attributes.display_name.contains("Project Files")
-        }).or_else(|| folders.first()).cloned();
+            let project_files_folder = folders.iter().find(|f| {
+                f.attributes.display_name.contains("Project Files")
+            }).or_else(|| folders.first()).cloned();
 
-        let root_folder = project_files_folder
-            .ok_or_else(|| anyhow::anyhow!("No 'Project Files' folder found in project!"))?;
-
-        let root_folder_id = root_folder.id.clone();
+            let root_folder = project_files_folder
+                .ok_or_else(|| anyhow::anyhow!("No 'Project Files' folder found in project!"))?;
+            
+            root_folder.id.clone()
+        };
 
         // ── Build the CloudProvider for CFAPI callbacks ──
         let provider = std::sync::Arc::new(super::cfapi_provider::ApsCloudProvider::new(

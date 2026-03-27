@@ -21,6 +21,35 @@ impl ApsDataManagementClient {
         }
     }
 
+    /// Aggregates top-level folders from all projects across all hubs.
+    pub async fn get_drive_view(&self, token: &str) -> Result<Vec<DriveItem>> {
+        let hubs = self.get_hubs(token).await?;
+        let mut drive_items = Vec::new();
+
+        for hub in hubs {
+            let h_id = hub.id.clone();
+            // Fetch projects for each hub
+            if let Ok(projects) = self.get_projects(token, &h_id).await {
+                for project in projects {
+                    let p_id = project.id.clone();
+                    // Fetch top folders for each project
+                    if let Ok(folders) = self.get_top_folders(token, &h_id, &p_id).await {
+                        for folder in folders {
+                            drive_items.push(DriveItem {
+                                name: folder.attributes.display_name,
+                                hub_id: h_id.clone(),
+                                project_id: p_id.clone(),
+                                folder_id: folder.id,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(drive_items)
+    }
+
     /// GET /project/v1/hubs
     pub async fn get_hubs(&self, token: &str) -> Result<Vec<Hub>> {
         let url = format!("{BASE_URL}/project/v1/hubs");

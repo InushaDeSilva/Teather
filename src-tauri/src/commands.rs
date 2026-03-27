@@ -31,6 +31,15 @@ pub struct FolderInfo {
     pub name: String,
 }
 
+#[derive(Serialize)]
+pub struct DriveItemInfo {
+    pub name: String,
+    pub hub_id: String,
+    pub project_id: String,
+    pub folder_id: String,
+}
+
+
 // ── Commands ──
 
 #[tauri::command]
@@ -133,6 +142,21 @@ pub async fn get_folders(state: State<'_, AppState>, hub_id: String, project_id:
 }
 
 #[tauri::command]
+pub async fn get_drive_view(state: State<'_, AppState>) -> Result<Vec<DriveItemInfo>, String> {
+    let engine = state.engine.lock().await;
+    let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+    let items = engine.data_mgmt.get_drive_view(&token).await.map_err(|e| format!("{e:#}"))?;
+    
+    Ok(items.into_iter().map(|i| DriveItemInfo {
+        name: i.name,
+        hub_id: i.hub_id,
+        project_id: i.project_id,
+        folder_id: i.folder_id,
+    }).collect())
+}
+
+
+#[tauri::command]
 pub async fn pause_sync(state: State<'_, AppState>) -> Result<(), String> {
     state.engine.lock().await.pause();
     Ok(())
@@ -154,8 +178,15 @@ pub async fn open_sync_folder(state: State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn start_sync(state: State<'_, AppState>, hub_id: String, project_id: String, project_name: String) -> Result<(), String> {
+pub async fn start_sync(
+    state: State<'_, AppState>, 
+    hub_id: String, 
+    project_id: String, 
+    project_name: String,
+    folder_id: Option<String>
+) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
-    engine.start(&hub_id, &project_id, &project_name).await.map_err(|e| format!("{e:#}"))?;
+    engine.start(&hub_id, &project_id, &project_name, folder_id).await.map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
+

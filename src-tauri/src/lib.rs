@@ -44,6 +44,7 @@ pub fn run() {
             commands::get_hubs,
             commands::get_projects,
             commands::get_folders,
+            commands::get_drive_view,
             commands::pause_sync,
             commands::resume_sync,
             commands::open_sync_folder,

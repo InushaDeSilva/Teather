@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// JSON:API top-level response wrapper.
 #[derive(Debug, Deserialize)]
@@ -189,4 +189,11 @@ pub struct TokenResponse {
     pub refresh_token: Option<String>,
     pub token_type: String,
     pub expires_in: u64,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DriveItem {
+    pub name: String,
+    pub hub_id: String,
+    pub project_id: String,
+    pub folder_id: String,
 }

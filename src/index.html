@@ -101,41 +101,63 @@
         async function loadHubs() {
             const list = document.getElementById('hub-list');
             try {
-                list.innerHTML = '<i>Loading your hubs...</i>';
-                let hubs = await invoke('get_hubs');
-                list.innerHTML = '';
+                list.innerHTML = '<i>Loading your Autodesk Drive...</i>';
                 
-                // Prioritize Autodesk Drive by checking extension type
-                hubs.sort((a, b) => {
-                    const typeA = a.extension_type || "";
-                    const typeB = b.extension_type || "";
-                    const aIsDrive = typeA.includes("a360:PersonalHub");
-                    const bIsDrive = typeB.includes("a360:PersonalHub");
-                    return (aIsDrive === bIsDrive) ? 0 : aIsDrive ? -1 : 1;
-                });
+                // 1. Load the Flat Drive View (Aggregated Folders)
+                const driveItems = await invoke('get_drive_view');
+                list.innerHTML = '';
 
-                if (hubs.length === 0) {
-                    list.innerHTML = '<p class="empty">No hubs found.</p>';
-                    return;
+                // Create "Autodesk Drive" virtual hub
+                const driveHub = document.createElement('div');
+                driveHub.className = 'tree-item hub-item selected';
+                driveHub.innerHTML = `<strong>☁️ Autodesk Drive</strong> <small style="color:#666; margin-left:8px;">(Personal & Shared)</small>`;
+                list.appendChild(driveHub);
+
+                const driveContainer = document.createElement('div');
+                driveContainer.className = 'projects-container';
+                list.appendChild(driveContainer);
+
+                if (driveItems.length === 0) {
+                    driveContainer.innerHTML = '<p class="empty" style="margin-left:20px;">No folders found in Drive.</p>';
+                } else {
+                    for (const item of driveItems) {
+                        const div = document.createElement('div');
+                        div.className = 'tree-item project-item';
+                        div.style.marginLeft = '20px';
+                        div.innerHTML = `<span>📁 ${item.name}</span>`;
+                        div.onclick = async () => {
+                            try {
+                                await invoke('start_sync', { 
+                                    hubId: item.hub_id, 
+                                    projectId: item.project_id, 
+                                    projectName: item.name,
+                                    folderId: item.folder_id 
+                                });
+                                showStatusView();
+                            } catch (e) {
+                                alert('Failed to start sync: ' + e);
+                            }
+                        };
+                        driveContainer.appendChild(div);
+                    }
                 }
 
-                for (const hub of hubs) {
-                    const extType = hub.extension_type || "";
-                    const isDrive = extType.includes("a360:PersonalHub");
-                    const isFusion = extType.includes("core:Hub");
-                    const isBim = extType.includes("bim360");
+                // 2. Load "Advanced" section for Hub/Project hierarchy
+                const advancedHeader = document.createElement('div');
+                advancedHeader.className = 'tree-item';
+                advancedHeader.style.marginTop = '20px';
+                advancedHeader.style.borderTop = '1px solid #333';
+                advancedHeader.style.paddingTop = '15px';
+                advancedHeader.innerHTML = `<strong>🛠️ All Projects (Advanced)</strong>`;
+                list.appendChild(advancedHeader);
 
+                const hubs = await invoke('get_hubs');
+                for (const hub of hubs) {
                     const div = document.createElement('div');
                     div.className = 'tree-item';
-                    
-                    let icon = "🏢";
-                    let label = "Hub";
-                    if (isDrive) { icon = "☁️"; label = "Autodesk Drive"; }
-                    else if (isFusion) { icon = "🏗️"; label = "Fusion"; }
-                    else if (isBim) { icon = "🏗️"; label = "BIM 360 / ACC"; }
-                    
-                    div.innerHTML = `<strong>${icon} ${hub.name}</strong> <small style="color:#666; margin-left: 8px;">(${label})</small>`;
-                    
+                    div.style.marginLeft = '10px';
+                    const isFusion = (hub.extension_type || "").includes("core:Hub");
+                    div.innerHTML = `<span>${isFusion ? '🏗️' : '🏢'} ${hub.name}</span>`;
                     div.onclick = () => loadProjects(hub.id, div);
                     list.appendChild(div);
                 }
@@ -144,38 +166,37 @@
             }
         }
 
-        async function loadProjects(hubId, selectedElement) {
-            // Highlight selected hub
-            document.querySelectorAll('#hub-list .tree-item').forEach(el => el.classList.remove('selected'));
-            selectedElement.classList.add('selected');
-            
-            // Remove any existing project list from other hubs
-            document.querySelectorAll('#hub-list .projects-container').forEach(el => el.remove());
+        function showStatusView() {
+            document.getElementById('picker-view').classList.remove('active');
+            document.getElementById('status-view').classList.add('active');
+        }
 
-            // Create container for projects under this hub
+        async function loadProjects(hubId, selectedElement) {
+            // Remove any existing project list from other hubs
+            document.querySelectorAll('#hub-list .advanced-projects-container').forEach(el => el.remove());
+
             const projContainer = document.createElement('div');
-            projContainer.className = 'projects-container';
-            projContainer.innerHTML = '<p class="loading" style="margin-left: 20px;">Loading projects...</p>';
+            projContainer.className = 'projects-container advanced-projects-container';
+            projContainer.innerHTML = '<p class="loading" style="margin-left: 30px;">Loading...</p>';
             selectedElement.insertAdjacentElement('afterend', projContainer);
 
             try {
                 const projects = await invoke('get_projects', { hubId });
                 projContainer.innerHTML = '';
-                if (projects.length === 0) {
-                    projContainer.innerHTML = '<p class="empty" style="margin-left: 20px;">No projects found.</p>';
-                    return;
-                }
                 for (const proj of projects) {
                     const div = document.createElement('div');
                     div.className = 'tree-item project-item';
-                    div.style.marginLeft = '20px';
+                    div.style.marginLeft = '30px';
                     div.innerHTML = `<span>📁 ${proj.name}</span>`;
                     div.onclick = async () => {
                         try {
-                            // Start syncing
-                            await invoke('start_sync', { hubId: hubId, projectId: proj.id, projectName: proj.name });
-                            document.getElementById('picker-view').classList.remove('active');
-                            document.getElementById('status-view').classList.add('active');
+                            await invoke('start_sync', { 
+                                hubId: hubId, 
+                                projectId: proj.id, 
+                                projectName: proj.name,
+                                folderId: null 
+                            });
+                            showStatusView();
                         } catch (e) {
                             alert('Failed to start sync: ' + e);
                         }
@@ -183,7 +204,7 @@
                     projContainer.appendChild(div);
                 }
             } catch (e) {
-                projContainer.innerHTML = `<p class="error" style="margin-left: 20px;">Error: ${e}</p>`;
+                projContainer.innerHTML = `<p class="error" style="margin-left: 30px;">Error: ${e}</p>`;
             }
         }
 
