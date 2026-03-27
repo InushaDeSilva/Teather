@@ -1,4 +1,4 @@
-//! Windows CFAPI in-sync state — clears Explorer "Sync pending" after cloud upload.
+//! Windows CFAPI in-sync state helpers.
 
 use std::path::Path;
 
@@ -10,4 +10,17 @@ pub fn mark_placeholder_in_sync(path: &Path) -> anyhow::Result<()> {
     ph.mark_in_sync(true, None)
         .map_err(|e| anyhow::anyhow!("CfSetInSyncState: {e:?}"))?;
     Ok(())
+}
+
+/// Returns `true` if the file has local bytes and is NOT in sync (i.e. Explorer shows
+/// "Sync pending"). For non-placeholder files (worker-downloaded), returns `true` if
+/// the file exists on disk.
+pub fn is_sync_pending(path: &Path) -> bool {
+    match Placeholder::open(path) {
+        Ok(ph) => match ph.info() {
+            Ok(Some(pi)) => !pi.is_in_sync() && pi.on_disk_data_size() > 0,
+            _ => false,
+        },
+        Err(_) => path.is_file(),
+    }
 }

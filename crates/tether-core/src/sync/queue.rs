@@ -63,10 +63,19 @@ impl SyncQueue {
         }
     }
 
-    /// Enqueue a new sync task.
+    /// Enqueue a new sync task. Skips if an identical (path + operation) task is already queued.
     pub async fn push(&self, task: SyncTask) {
+        let mut q = self.queue.lock().await;
+        let dominated = q.iter().any(|p| {
+            p.0.local_path == task.local_path && p.0.operation == task.operation
+        });
+        if dominated {
+            debug!("Dedup skip {:?} for {}", task.operation, task.local_path.display());
+            return;
+        }
         debug!("Queued {:?} for {}", task.operation, task.local_path.display());
-        self.queue.lock().await.push(PrioritizedTask(task));
+        q.push(PrioritizedTask(task));
+        drop(q);
         self.notify.notify_one();
     }
 
@@ -119,5 +128,29 @@ impl SyncQueue {
     /// Get a download semaphore permit (blocks until a slot is free).
     pub fn download_semaphore(&self) -> Arc<Semaphore> {
         self.download_semaphore.clone()
+    }
+
+    /// Remove all queued tasks whose operation matches the predicate.
+    /// Returns the number of tasks removed.
+    pub async fn retain(&self, keep: impl Fn(&SyncTask) -> bool) -> usize {
+        let mut q = self.queue.lock().await;
+        let before = q.len();
+        let kept: Vec<PrioritizedTask> = q
+            .drain()
+            .filter(|p| keep(&p.0))
+            .collect();
+        *q = kept.into_iter().collect();
+        before - q.len()
+    }
+
+    /// Purge all queued Download tasks (e.g. stale poller-driven downloads).
+    pub async fn clear_downloads(&self) -> usize {
+        let removed = self
+            .retain(|t| !matches!(t.operation, super::task::SyncOperation::Download))
+            .await;
+        if removed > 0 {
+            tracing::info!("Cleared {} stale download tasks from queue", removed);
+        }
+        removed
     }
 }

@@ -17,16 +17,18 @@ const MAX_FOLDER_DEPTH: usize = 64;
 /// A detected cloud change.
 #[derive(Debug)]
 pub enum CloudChange {
-    /// A cloud file is newer than the local version.
+    /// A cloud file is newer than the local version — dehydrate so next open gets fresh bytes.
     Updated {
         cloud_item_id: String,
         /// Path relative to sync root, `/` separators (e.g. `Rocket Stand/foo.ipt`).
         local_relative_path: String,
+        file_size: u64,
     },
-    /// A new file appeared in the cloud that we don't have locally.
+    /// A new file appeared in the cloud — create a placeholder (no download).
     Added {
         cloud_item_id: String,
         local_relative_path: String,
+        file_size: u64,
     },
     /// A file was removed from the cloud.
     Removed {
@@ -163,6 +165,7 @@ async fn poll_once(
                                 CloudChange::Updated {
                                     cloud_item_id: item.id.clone(),
                                     local_relative_path: rel_path.clone(),
+                                    file_size: item.attributes.storage_size.unwrap_or(0),
                                 },
                             )
                             .await;
@@ -184,6 +187,7 @@ async fn poll_once(
                         CloudChange::Added {
                             cloud_item_id: item.id.clone(),
                             local_relative_path: rel_path.clone(),
+                            file_size: item.attributes.storage_size.unwrap_or(0),
                         },
                     )
                     .await;

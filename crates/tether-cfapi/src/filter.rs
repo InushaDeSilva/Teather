@@ -370,7 +370,7 @@ impl SyncFilter for TetherSyncFilter {
         })
     }
 
-    /// Last handle closed — if the file was modified locally, enqueue upload so Explorer clears "Sync pending".
+    /// Last handle closed — if sync is pending, upload.
     fn closed(&self, request: Request, info: info::Closed) {
         if info.deleted() {
             return;
@@ -379,57 +379,48 @@ impl SyncFilter for TetherSyncFilter {
         if path.is_dir() {
             return;
         }
+
+        // ── Resolve cloud item ID: blob first, DB fallback ──
         let blob = request.file_blob();
-        let cloud_id = std::str::from_utf8(blob).unwrap_or("").trim();
+        let mut cloud_id = std::str::from_utf8(blob).unwrap_or("").trim().to_string();
+
+        if cloud_id.is_empty() {
+            let relative = path
+                .strip_prefix(&self.root_path)
+                .unwrap_or(path.as_path());
+            cloud_id = self
+                .provider
+                .resolve_cloud_item_id_by_path(relative)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+        }
+
         if cloud_id.is_empty() {
             return;
         }
-        let ph = match Placeholder::open(&path) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::debug!(
-                    "closed: skip open {}: {:?}",
-                    path.display(),
-                    e
-                );
-                return;
-            }
-        };
-        let info = match ph.info() {
-            Ok(Some(pi)) => pi,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::debug!("closed: info {}: {:?}", path.display(), e);
-                return;
-            }
-        };
-        if info.is_in_sync() {
+
+        // ── If sync is pending, upload. That's it. ──
+        let in_sync = Placeholder::open(&path)
+            .ok()
+            .and_then(|ph| ph.info().ok().flatten())
+            .map(|pi| pi.is_in_sync())
+            .unwrap_or(false);
+
+        if in_sync {
             return;
         }
-        // Dirty signal: explicit modified ranges, or on-disk vs validated mismatch (Inventor/CAD often
-        // leaves ModifiedDataSize at 0 while the file is still not in sync).
-        let dirty = info.modified_data_size() > 0
-            || info.on_disk_data_size() != info.validated_data_size();
-        if !dirty {
-            tracing::debug!(
-                "closed: not in sync but no size dirty signal (mod={} on_disk={} validated={}) — skip {}",
-                info.modified_data_size(),
-                info.on_disk_data_size(),
-                info.validated_data_size(),
-                path.display()
-            );
-            return;
-        }
+
         tracing::info!(
-            "closed: local edits pending sync → queue upload {} (item={})",
+            "closed: sync pending → upload {} (item={})",
             path.display(),
             cloud_id
         );
         if let Err(e) = self
             .provider
-            .queue_upload_if_dirty(path.to_path_buf(), cloud_id)
+            .queue_upload_if_dirty(path.to_path_buf(), &cloud_id)
         {
-            tracing::warn!("closed: queue_upload_if_dirty failed: {e:#}");
+            tracing::warn!("closed: upload queue failed: {e:#}");
         }
     }
 }

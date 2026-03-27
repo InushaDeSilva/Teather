@@ -84,4 +84,14 @@ pub trait CloudProvider: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Fallback for files whose placeholder blob is empty (e.g. downloaded by the old
+    /// worker code which used `fs::write` instead of CFAPI hydration).
+    /// Returns the cloud item ID if one can be found for the given relative path.
+    fn resolve_cloud_item_id_by_path(
+        &self,
+        _relative_path: &Path,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }

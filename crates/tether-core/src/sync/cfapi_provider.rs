@@ -273,6 +273,17 @@ impl CloudProvider for ApsCloudProvider {
             .map_err(|e| anyhow::anyhow!("upload channel closed: {e}"))
     }
 
+    fn resolve_cloud_item_id_by_path(&self, relative_path: &Path) -> Result<Option<String>> {
+        let (db, root_id) = match (&self.state_db, &self.sync_root_id) {
+            (Some(db), Some(rid)) => (db, rid.as_str()),
+            _ => return Ok(None),
+        };
+        let rel = normalize_rel(relative_path);
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        let entry = db.get_file_entry_by_path(root_id, &rel)?;
+        Ok(entry.and_then(|e| e.cloud_item_id))
+    }
+
     fn on_hydration_complete(&self, cloud_item_id: &str, relative_path: &Path) -> Result<()> {
         let (db, root_id) = match (&self.state_db, &self.sync_root_id) {
             (Some(db), Some(rid)) => (db, rid.as_str()),

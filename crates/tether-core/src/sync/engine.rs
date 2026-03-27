@@ -204,6 +204,9 @@ impl SyncEngine {
             project_id.to_string(),
         ).await;
 
+        // Purge any stale download tasks from previous sessions / old poller logic.
+        self.queue.clear_downloads().await;
+
         // ── Cloud poller — detects remote changes for proactive placeholder updates ──
         {
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
@@ -230,36 +233,97 @@ impl SyncEngine {
                 ).await;
             });
 
-            let queue_clone = self.queue.clone();
             let root_clone = sync_root;
-            let sr_id = sync_root_db_id.clone();
             tokio::spawn(async move {
                 while let Some(change) = rx.recv().await {
                     match change {
-                        super::cloud_poller::CloudChange::Added { cloud_item_id, local_relative_path } |
-                        super::cloud_poller::CloudChange::Updated { cloud_item_id, local_relative_path } => {
-                            let mut task = super::task::SyncTask::new(
-                                super::task::SyncOperation::Download,
-                                super::task::SyncPriority::Normal,
-                                root_clone.join(&local_relative_path),
-                            );
-                            task.cloud_item_id = Some(cloud_item_id);
-                            task.sync_root_id = Some(sr_id.clone());
-                            task.sync_root_path = Some(root_clone.clone());
-                            queue_clone.push(task).await;
+                        super::cloud_poller::CloudChange::Added {
+                            cloud_item_id,
+                            local_relative_path,
+                            file_size,
+                        } => {
+                            let full = root_clone.join(local_relative_path.replace('/', "\\"));
+                            if full.exists() {
+                                continue;
+                            }
+                            if let Some(parent) = full.parent() {
+                                if !parent.exists() {
+                                    // Parent folder not visited yet — placeholder will be
+                                    // created lazily by fetch_placeholders when user navigates.
+                                    continue;
+                                }
+                                let file_name = full
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or_default();
+                                if let Err(e) = tether_cfapi::create_placeholder_file(
+                                    parent,
+                                    file_name,
+                                    file_size,
+                                    &cloud_item_id,
+                                ) {
+                                    tracing::warn!(
+                                        "Failed to create placeholder for {}: {e:#}",
+                                        local_relative_path
+                                    );
+                                }
+                            }
                         }
-                        super::cloud_poller::CloudChange::Removed { cloud_item_id, local_relative_path } => {
-                            let mut task = super::task::SyncTask::new(
-                                super::task::SyncOperation::Delete,
-                                super::task::SyncPriority::Normal,
-                                root_clone.join(&local_relative_path),
-                            );
-                            task.cloud_item_id = Some(cloud_item_id);
-                            task.sync_root_id = Some(sr_id.clone());
-                            task.sync_root_path = Some(root_clone.clone());
-                            queue_clone.push(task).await;
+                        super::cloud_poller::CloudChange::Updated {
+                            local_relative_path,
+                            ..
+                        } => {
+                            let full = root_clone.join(local_relative_path.replace('/', "\\"));
+                            if !full.exists() {
+                                continue;
+                            }
+                            match tether_cfapi::dehydrate_if_hydrated(&full) {
+                                Ok(true) => {
+                                    tracing::info!(
+                                        "Dehydrated stale local copy: {}",
+                                        local_relative_path
+                                    );
+                                }
+                                Ok(false) => {} // already cloud-only
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to dehydrate {}: {e:#}",
+                                        local_relative_path
+                                    );
+                                }
+                            }
+                        }
+                        super::cloud_poller::CloudChange::Removed {
+                            local_relative_path,
+                            ..
+                        } => {
+                            let full = root_clone.join(local_relative_path.replace('/', "\\"));
+                            if full.exists() {
+                                if let Err(e) = std::fs::remove_file(&full) {
+                                    tracing::warn!(
+                                        "Failed to remove placeholder {}: {e:#}",
+                                        local_relative_path
+                                    );
+                                }
+                            }
                         }
                     }
+                }
+            });
+        }
+
+        // ── Periodic local scanner — picks up "sync pending" files and queues uploads ──
+        {
+            let scan_root = self.sync_root_path.clone().unwrap();
+            let scan_db = self.db.clone();
+            let scan_queue = self.queue.clone();
+            let scan_sr_id = sync_root_db_id.clone();
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                loop {
+                    interval.tick().await;
+                    scan_pending_uploads(&scan_root, &scan_db, &scan_sr_id, &scan_queue).await;
                 }
             });
         }
@@ -269,5 +333,63 @@ impl SyncEngine {
 
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+}
+
+/// Walk the sync root, find files Explorer marks "Sync pending", queue uploads.
+async fn scan_pending_uploads(
+    sync_root: &std::path::Path,
+    db: &std::sync::Arc<std::sync::Mutex<crate::db::database::SyncDatabase>>,
+    sync_root_id: &str,
+    queue: &std::sync::Arc<super::queue::SyncQueue>,
+) {
+    let mut stack = vec![sync_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !tether_cfapi::is_sync_pending(&path) {
+                continue;
+            }
+
+            let rel = path
+                .strip_prefix(sync_root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+
+            let cloud_item_id = {
+                let db = match db.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                db.get_file_entry_by_path(sync_root_id, &rel)
+                    .ok()
+                    .flatten()
+                    .and_then(|e| e.cloud_item_id)
+            };
+
+            let item_id = match cloud_item_id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let mut task = super::task::SyncTask::new(
+                super::task::SyncOperation::Upload,
+                super::task::SyncPriority::Normal,
+                path.clone(),
+            );
+            task.cloud_item_id = Some(item_id);
+            task.sync_root_id = Some(sync_root_id.to_string());
+            task.sync_root_path = Some(sync_root.to_path_buf());
+            queue.push(task).await;
+        }
     }
 }
