@@ -406,10 +406,16 @@ impl SyncFilter for TetherSyncFilter {
         if info.is_in_sync() {
             return;
         }
-        // Only upload when user data actually changed — avoids queueing on metadata-only / explorer noise.
-        if info.modified_data_size() <= 0 {
+        // Dirty signal: explicit modified ranges, or on-disk vs validated mismatch (Inventor/CAD often
+        // leaves ModifiedDataSize at 0 while the file is still not in sync).
+        let dirty = info.modified_data_size() > 0
+            || info.on_disk_data_size() != info.validated_data_size();
+        if !dirty {
             tracing::debug!(
-                "closed: out of sync but modified_data_size=0, skip upload {}",
+                "closed: not in sync but no size dirty signal (mod={} on_disk={} validated={}) — skip {}",
+                info.modified_data_size(),
+                info.on_disk_data_size(),
+                info.validated_data_size(),
                 path.display()
             );
             return;

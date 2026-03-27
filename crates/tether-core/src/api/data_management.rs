@@ -1,7 +1,7 @@
 //! APS Data Management API client — browsing hubs, projects, folders, items.
 
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use tracing::debug;
 
 use super::models::*;
@@ -94,7 +94,7 @@ impl ApsDataManagementClient {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
 
-            tracing::info!("RAW HUBS RESPONSE: {}", text);
+            debug!("RAW HUBS RESPONSE: {}", text);
 
             if !status.is_success() {
                 anyhow::bail!("API request failed ({}): {}", status, text);
@@ -111,21 +111,57 @@ impl ApsDataManagementClient {
     }
 
     /// GET /project/v1/hubs/{hubId}/projects (with pagination)
+    ///
+    /// Returns an empty list when the hub is not API-accessible (e.g. BIM360DM JPN or other
+    /// regional endpoints your app is not entitled to). Callers treat this as “no projects”.
     pub async fn get_projects(&self, token: &str, hub_id: &str) -> Result<Vec<Project>> {
         let mut all_projects = Vec::new();
         let mut url = Some(format!("{BASE_URL}/project/v1/hubs/{hub_id}/projects"));
 
         while let Some(current_url) = url {
-            let resp: JsonApiListResponse<Project> = self
-                .get_json(&current_url, token)
-                .await
-                .context("Failed to fetch projects")?;
+            debug!("GET {current_url}");
+            let resp = self.http.get(&current_url).bearer_auth(token).send().await?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
 
-            all_projects.extend(resp.data);
-            url = resp.links.and_then(|l| l.next).map(|n| n.href);
+            if Self::is_hub_projects_forbidden(status, &text) {
+                tracing::warn!(
+                    "Skipping projects for hub {} ({}): {}",
+                    hub_id,
+                    status,
+                    Self::short_error_snippet(&text)
+                );
+                return Ok(all_projects);
+            }
+
+            if !status.is_success() {
+                anyhow::bail!("API request failed ({}): {}", status, text);
+            }
+
+            let page: JsonApiListResponse<Project> = serde_json::from_str(&text)
+                .context("Failed to parse projects JSON")?;
+            all_projects.extend(page.data);
+            url = page.links.and_then(|l| l.next).map(|n| n.href);
         }
 
         Ok(all_projects)
+    }
+
+    fn is_hub_projects_forbidden(status: StatusCode, body: &str) -> bool {
+        if status == StatusCode::FORBIDDEN {
+            return true;
+        }
+        if status != StatusCode::BAD_REQUEST {
+            return false;
+        }
+        let lower = body.to_lowercase();
+        lower.contains("permission")
+            || lower.contains("bim360dm")
+            || lower.contains("unable to get hubs")
+    }
+
+    fn short_error_snippet(body: &str) -> String {
+        body.chars().take(280).collect::<String>()
     }
 
     /// Resolve a folder URN by searching across all hubs/projects.
@@ -354,16 +390,18 @@ impl ApsDataManagementClient {
     }
 
     /// Mark a file as deleted in BIM 360 / ACC (POST Deleted version).
-    /// JSON:API content type; attributes are extension-only (adding `name` often yields BAD_INPUT).
+    /// Tries extension-only first (works for many ACC projects); on `400 BAD_INPUT`, retries with
+    /// `name` set (APS blog / older Docs payloads).
     pub async fn delete_item_as_deleted_version(
         &self,
         token: &str,
         project_id: &str,
         item_id: &str,
-        _display_name: &str,
+        display_name: &str,
     ) -> Result<VersionInfo> {
         let url = format!("{BASE_URL}/data/v1/projects/{project_id}/versions");
-        let body = serde_json::json!({
+
+        let body_minimal = serde_json::json!({
             "jsonapi": { "version": "1.0" },
             "data": {
                 "type": "versions",
@@ -381,25 +419,65 @@ impl ApsDataManagementClient {
             }
         });
 
-        let body_str = serde_json::to_string(&body)?;
+        let (status, text) = self
+            .post_versions_jsonapi(token, &url, &body_minimal)
+            .await?;
+        let (status, text) = if status == StatusCode::BAD_REQUEST {
+            debug!(
+                "delete Deleted version: retrying with name attribute (first response: {})",
+                text.chars().take(200).collect::<String>()
+            );
+            let body_named = serde_json::json!({
+                "jsonapi": { "version": "1.0" },
+                "data": {
+                    "type": "versions",
+                    "attributes": {
+                        "name": display_name,
+                        "extension": {
+                            "type": "versions:autodesk.core:Deleted",
+                            "version": "1.0"
+                        }
+                    },
+                    "relationships": {
+                        "item": {
+                            "data": { "type": "items", "id": item_id }
+                        }
+                    }
+                }
+            });
+            self.post_versions_jsonapi(token, &url, &body_named).await?
+        } else {
+            (status, text)
+        };
+
+        if !status.is_success() {
+            anyhow::bail!("Delete item (Deleted version) failed ({}): {}", status, text);
+        }
+
+        let result: JsonApiResponse<VersionInfo> = serde_json::from_str(&text)
+            .context("parse delete-version response")?;
+        Ok(result.data)
+    }
+
+    async fn post_versions_jsonapi(
+        &self,
+        token: &str,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<(StatusCode, String)> {
+        let body_str = serde_json::to_string(body)?;
         let resp = self
             .http
-            .post(&url)
+            .post(url)
             .bearer_auth(token)
             .header("Content-Type", "application/vnd.api+json")
             .header("Accept", "application/vnd.api+json")
             .body(body_str)
             .send()
             .await?;
-
         let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Delete item (Deleted version) failed ({}): {}", status, text);
-        }
-
-        let result: JsonApiResponse<VersionInfo> = resp.json().await?;
-        Ok(result.data)
+        let text = resp.text().await.unwrap_or_default();
+        Ok((status, text))
     }
 
     /// Rename a file by PATCHing the latest version's `name`.
