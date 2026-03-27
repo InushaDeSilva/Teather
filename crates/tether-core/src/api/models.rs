@@ -98,6 +98,9 @@ pub struct ItemAttributes {
     pub create_time: Option<String>,
     #[serde(rename = "lastModifiedTime")]
     pub last_modified_time: Option<String>,
+    /// File size in bytes (present for files, absent for folders)
+    #[serde(rename = "storageSize", default)]
+    pub storage_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

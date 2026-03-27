@@ -1,3 +1,4 @@
+pub mod cfapi_provider;
 pub mod change_detector;
 pub mod cloud_poller;
 pub mod conflict;

@@ -190,6 +190,47 @@ impl ApsStorageClient {
         info!("Downloaded {} ({} bytes)", dest_path.display(), size);
         Ok(size)
     }
+
+    /// Download a file and return its raw bytes (for CFAPI hydration).
+    pub async fn download_to_bytes(
+        &self,
+        token: &str,
+        bucket_key: &str,
+        object_key: &str,
+    ) -> Result<Vec<u8>> {
+        // Step 1: Get signed download URL
+        let url = format!(
+            "{BASE_URL}/oss/v2/buckets/{bucket_key}/objects/{object_key}/signeds3download"
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("Failed to get download URL")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Get download URL failed ({}): {}", status, text);
+        }
+
+        let download_resp: SignedS3DownloadResponse = resp.json().await?;
+        let signed_url = download_resp.url.context("No download URL returned")?;
+
+        // Step 2: Download from the signed URL
+        let resp = self
+            .http
+            .get(&signed_url)
+            .send()
+            .await
+            .context("S3 download failed")?;
+
+        let bytes = resp.bytes().await?;
+        debug!("Downloaded {} bytes to memory", bytes.len());
+        Ok(bytes.to_vec())
+    }
 }
 
 /// Parse a storage URN like "urn:adsk.objects:os.object:{bucketKey}/{objectKey}"

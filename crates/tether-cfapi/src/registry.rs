@@ -81,19 +81,23 @@ pub fn register_sync_root(
 }
 
 use cloud_filter::root::{Session, Connection};
+use std::sync::Arc;
 use crate::filter::TetherSyncFilter;
+use crate::provider::CloudProvider;
 
-/// Connects to an existing registered sync root, establishing the callback message loop
+/// Connects to an existing registered sync root, establishing the callback message loop.
+/// The `provider` handles all cloud API calls from within CFAPI callbacks.
 pub fn connect_sync_root(
     sync_root_path: &Path,
+    provider: Arc<dyn CloudProvider>,
 ) -> Result<Connection<TetherSyncFilter>> {
     tracing::info!("Connecting CFAPI message loop for {:?}", sync_root_path);
-    
-    let filter = TetherSyncFilter::new(sync_root_path.to_path_buf());
-    
+
+    let filter = TetherSyncFilter::new(sync_root_path.to_path_buf(), provider);
+
     let connection = Session::new()
         .connect(sync_root_path, filter)
         .context("Failed to connect to Windows CFAPI Sync Root")?;
-        
+
     Ok(connection)
 }

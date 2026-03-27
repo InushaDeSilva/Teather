@@ -87,26 +87,55 @@ impl SyncEngine {
 
     pub async fn start(&mut self, hub_id: &str, project_id: &str, project_name: &str) -> Result<()> {
         info!("Starting sync for project: {} ({})", project_name, project_id);
-        
+
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
         let sync_root = std::path::PathBuf::from(local_app_data)
             .join("Tether")
             .join("Sync")
             .join(project_name.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-' && c != '_', ""));
-            
+
         std::fs::create_dir_all(&sync_root)?;
         self.sync_root_path = Some(sync_root.clone());
         self.status = SyncStatus::Idle;
-        
-        // Initialize Windows Cloud Files API Virtual Drive
+
+        // Discover top-level folders before CFAPI registration
+        let token = self.auth.get_access_token().map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
+        let folders = self.data_mgmt.get_top_folders(&token, hub_id, project_id).await?;
+
+        info!("Found {} top-level folders for project.", folders.len());
+        for f in &folders {
+            info!(" - Folder ID: {}, Name: {}", f.id, f.attributes.display_name);
+        }
+
+        // Find the "Project Files" folder or fallback to the first available
+        let project_files_folder = folders.iter().find(|f| {
+            f.attributes.display_name.contains("Project Files")
+        }).or_else(|| folders.first()).cloned();
+
+        let root_folder = project_files_folder
+            .ok_or_else(|| anyhow::anyhow!("No 'Project Files' folder found in project!"))?;
+
+        let root_folder_id = root_folder.id.clone();
+
+        // ── Build the CloudProvider for CFAPI callbacks ──
+        let provider = std::sync::Arc::new(super::cfapi_provider::ApsCloudProvider::new(
+            tokio::runtime::Handle::current(),
+            self.auth.clone(),
+            self.data_mgmt.clone(),
+            self.storage.clone(),
+            project_id.to_string(),
+            root_folder_id.clone(),
+        ));
+
+        // ── Register and connect the Windows Cloud Files virtual drive ──
         let provider_name = format!("Tether - {}", project_name);
         tether_cfapi::register_sync_root(&provider_name, "1.0.0", &sync_root)?;
-        
-        // Connect the message loop
-        let connection = tether_cfapi::connect_sync_root(&sync_root)?;
-        self.cf_connection = Some(connection);
 
-        // Start background workers
+        let connection = tether_cfapi::connect_sync_root(&sync_root, provider)?;
+        self.cf_connection = Some(connection);
+        info!("CFAPI virtual drive connected at {:?}", sync_root);
+
+        // ── Start background workers for queue-based tasks ──
         super::worker::start_workers(
             2,
             self.queue.clone(),
@@ -117,29 +146,16 @@ impl SyncEngine {
             project_id.to_string(),
         ).await;
 
-        let token = self.auth.get_access_token().map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
-        let folders = self.data_mgmt.get_top_folders(&token, hub_id, project_id).await?;
-        
-        info!("Found {} top-level folders for project.", folders.len());
-        for f in &folders {
-            info!(" - Folder ID: {}, Name: {}", f.id, f.attributes.display_name);
-        }
-        
-        // Find the top folder containing "Project Files", or fallback to the first available if not found
-        let project_files_folder = folders.iter().find(|f| {
-            f.attributes.display_name.contains("Project Files")
-        }).or_else(|| folders.first()).cloned();
-        
-        if let Some(folder) = project_files_folder {
+        // ── Cloud poller — detects remote changes for proactive placeholder updates ──
+        {
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-            
+
             let auth_clone = self.auth.clone();
             let data_clone = self.data_mgmt.clone();
             let db_clone = self.db.clone();
             let pid = project_id.to_string();
-            let fid = folder.id.clone();
-            
-            // Start the cloud poller
+            let fid = root_folder_id;
+
             tokio::spawn(async move {
                 super::cloud_poller::start_polling(
                     30,
@@ -149,11 +165,10 @@ impl SyncEngine {
                     pid,
                     fid,
                     "root".to_string(),
-                    tx
+                    tx,
                 ).await;
             });
 
-            // Listen to cloud changes and enqueue tasks
             let queue_clone = self.queue.clone();
             let root_clone = sync_root;
             tokio::spawn(async move {
@@ -181,10 +196,8 @@ impl SyncEngine {
                     }
                 }
             });
-        } else {
-            tracing::warn!("No 'Project Files' folder found in project!");
         }
-        
+
         Ok(())
     }
 
