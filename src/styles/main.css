@@ -1,0 +1,265 @@
+/* ── Tether — Design System ── */
+
+:root {
+    --bg-primary: #0f0f14;
+    --bg-secondary: #1a1a24;
+    --bg-card: #1e1e2a;
+    --bg-card-hover: #252535;
+    --text-primary: #e8e8f0;
+    --text-secondary: #9090a8;
+    --text-muted: #606078;
+    --accent: #6366f1;
+    --accent-hover: #818cf8;
+    --accent-glow: rgba(99, 102, 241, 0.15);
+    --success: #34d399;
+    --warning: #fbbf24;
+    --error: #f87171;
+    --border: rgba(255, 255, 255, 0.06);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --font: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+}
+
+.app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    padding: 20px;
+    gap: 16px;
+}
+
+/* ── Header ── */
+.header {
+    text-align: center;
+    padding: 16px 0 8px;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.logo-icon {
+    font-size: 28px;
+    filter: drop-shadow(0 0 8px var(--accent));
+}
+
+.logo h1 {
+    font-size: 24px;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+}
+
+.subtitle {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-top: 4px;
+}
+
+/* ── Views ── */
+.view {
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1;
+    animation: fadeIn 0.3s ease;
+}
+
+.view.active {
+    display: flex;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Cards ── */
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    transition: background var(--transition);
+}
+
+.card:hover {
+    background: var(--bg-card-hover);
+}
+
+.card h2 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.card p {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* ── Buttons ── */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition);
+    font-family: var(--font);
+}
+
+.btn-primary {
+    background: linear-gradient(135deg, var(--accent), #8b5cf6);
+    color: white;
+    box-shadow: 0 2px 12px var(--accent-glow);
+    width: 100%;
+    margin-top: 16px;
+    padding: 12px;
+}
+
+.btn-primary:hover {
+    background: linear-gradient(135deg, var(--accent-hover), #a78bfa);
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+    transform: translateY(-1px);
+}
+
+.btn-secondary {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    flex: 1;
+}
+
+.btn-secondary:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--accent);
+}
+
+/* ── Sync Status ── */
+.sync-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.status-icon {
+    font-size: 24px;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(52, 211, 153, 0.1);
+    color: var(--success);
+    flex-shrink: 0;
+}
+
+.meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* ── Activity List ── */
+.activity-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.activity-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-secondary);
+    font-size: 13px;
+}
+
+.activity-list li.empty {
+    color: var(--text-muted);
+    justify-content: center;
+    font-style: italic;
+}
+
+/* ── Actions ── */
+.actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+}
+
+/* ── Status text ── */
+.status-text {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-align: center;
+    margin-top: 8px;
+}
+
+/* ── Loading ── */
+.loading {
+    color: var(--text-muted);
+    text-align: center;
+    font-style: italic;
+}
+
+/* ── Tree list (project picker) ── */
+.tree-list {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.tree-item {
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--transition);
+    font-size: 14px;
+}
+
+.tree-item:hover {
+    background: var(--bg-card-hover);
+}
+
+.tree-item.selected {
+    background: var(--accent-glow);
+    border-left: 3px solid var(--accent);
+}

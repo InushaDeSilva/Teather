@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tether</title>
+    <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">⚡</span>
+                <h1>Tether</h1>
+            </div>
+            <p class="subtitle">Autodesk Cloud Sync</p>
+        </header>
+
+        <!-- Login View -->
+        <div id="login-view" class="view active">
+            <div class="card">
+                <h2>Connect your Autodesk account</h2>
+                <p>Sign in to access your BIM 360 and ACC projects.</p>
+                <button id="btn-login" class="btn btn-primary">
+                    Sign in with Autodesk
+                </button>
+                <p id="login-status" class="status-text"></p>
+            </div>
+        </div>
+
+        <!-- Project Picker View -->
+        <div id="picker-view" class="view">
+            <div class="card">
+                <h2>Select a project folder</h2>
+                <div id="hub-list" class="tree-list">
+                    <p class="loading">Loading hubs...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sync Status View -->
+        <div id="status-view" class="view">
+            <div class="card">
+                <div class="sync-status">
+                    <span id="status-icon" class="status-icon">✓</span>
+                    <div>
+                        <strong id="status-text">Up to date</strong>
+                        <p id="last-sync" class="meta">Last synced: just now</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Recent Activity</h3>
+                <ul id="activity-list" class="activity-list">
+                    <li class="empty">No activity yet</li>
+                </ul>
+            </div>
+
+            <div class="actions">
+                <button id="btn-open-folder" class="btn btn-secondary">📁 Open sync folder</button>
+                <button id="btn-pause" class="btn btn-secondary">⏸ Pause syncing</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { invoke } = window.__TAURI__.core;
+
+        // ── Login ──
+        document.getElementById('btn-login').addEventListener('click', async () => {
+            try {
+                const url = await invoke('start_login');
+                document.getElementById('login-status').textContent = 'Waiting for browser login...';
+            } catch (e) {
+                document.getElementById('login-status').textContent = 'Error: ' + e;
+            }
+        });
+
+        // ── Sync status polling ──
+        async function pollStatus() {
+            try {
+                const resp = await invoke('get_sync_status');
+                const statusText = document.getElementById('status-text');
+                const statusIcon = document.getElementById('status-icon');
+
+                if (resp.status === 'Idle') {
+                    statusIcon.textContent = '✓';
+                    statusText.textContent = 'Up to date';
+                } else if (resp.status === 'Paused') {
+                    statusIcon.textContent = '⏸';
+                    statusText.textContent = 'Paused';
+                } else if (typeof resp.status === 'object' && resp.status.Syncing) {
+                    statusIcon.textContent = '⟳';
+                    statusText.textContent = `Syncing ${resp.status.Syncing.active_count} files...`;
+                } else if (typeof resp.status === 'object' && resp.status.Error) {
+                    statusIcon.textContent = '✕';
+                    statusText.textContent = 'Error: ' + resp.status.Error.message;
+                }
+            } catch (e) {
+                console.log('Status poll error:', e);
+            }
+        }
+
+        // ── Actions ──
+        document.getElementById('btn-open-folder')?.addEventListener('click', () => invoke('open_sync_folder'));
+        document.getElementById('btn-pause')?.addEventListener('click', async () => {
+            const btn = document.getElementById('btn-pause');
+            if (btn.textContent.includes('Pause')) {
+                await invoke('pause_sync');
+                btn.textContent = '▶ Resume syncing';
+            } else {
+                await invoke('resume_sync');
+                btn.textContent = '⏸ Pause syncing';
+            }
+        });
+
+        // Poll status every 5 seconds
+        setInterval(pollStatus, 5000);
+    </script>
+</body>
+</html>
