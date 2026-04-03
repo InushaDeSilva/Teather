@@ -76,6 +76,16 @@ pub trait CloudProvider: Send + Sync {
         Ok(())
     }
 
+    /// Record a local archive-save move (for example `Part.ipt -> OldVersions/Part.0001.ipt`)
+    /// so the sync engine can defer syncing the backup copy until the recreated live file settles.
+    fn note_archive_move(
+        &self,
+        _old_relative: &Path,
+        _new_relative: &Path,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// After a placeholder is fully hydrated in [`crate::filter::TetherSyncFilter::fetch_data`].
     fn on_hydration_complete(
         &self,

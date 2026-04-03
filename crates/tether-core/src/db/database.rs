@@ -276,6 +276,40 @@ impl SyncDatabase {
         Ok(())
     }
 
+    pub fn update_local_observed_state(
+        &self,
+        sync_root_id: &str,
+        relative_path: &str,
+        last_local_modified: Option<&str>,
+        file_size: Option<i64>,
+        hydration_state: &str,
+        is_placeholder: bool,
+        sync_state: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE file_entries
+             SET last_local_modified = COALESCE(?1, last_local_modified),
+                 file_size = COALESCE(?2, file_size),
+                 hydration_state = ?3,
+                 is_placeholder = ?4,
+                 sync_state = ?5,
+                 hydration_reason = ?6
+             WHERE sync_root_id = ?7 AND local_relative_path = ?8",
+            rusqlite::params![
+                last_local_modified,
+                file_size,
+                hydration_state,
+                if is_placeholder { 1 } else { 0 },
+                sync_state,
+                reason,
+                sync_root_id,
+                relative_path
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn update_base_remote_version(
         &self,
         sync_root_id: &str,

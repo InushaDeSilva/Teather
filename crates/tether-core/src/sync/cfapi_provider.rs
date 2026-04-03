@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -21,6 +21,7 @@ use crate::api::data_management::ApsDataManagementClient;
 use crate::api::storage::ApsStorageClient;
 use crate::db::database::{FileEntryRow, SyncDatabase};
 use crate::sync::parity::{prompt_payload_json, PromptKind, PromptPayload};
+use crate::sync::save_patterns::SavePatternCoalescer;
 
 fn normalize_rel(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
@@ -39,6 +40,7 @@ pub struct ApsCloudProvider {
     state_db: Option<Arc<Mutex<SyncDatabase>>>,
     sync_root_id: Option<String>,
     upload_tx: UnboundedSender<(PathBuf, String)>,
+    save_patterns: Arc<Mutex<SavePatternCoalescer>>,
     /// Collapse duplicate `closed` callbacks for the same path (same tick).
     upload_dedup: Mutex<HashMap<PathBuf, Instant>>,
 }
@@ -54,6 +56,7 @@ impl ApsCloudProvider {
         state_db: Option<Arc<Mutex<SyncDatabase>>>,
         sync_root_id: Option<String>,
         upload_tx: UnboundedSender<(PathBuf, String)>,
+        save_patterns: Arc<Mutex<SavePatternCoalescer>>,
     ) -> Self {
         let mut map = HashMap::new();
         // Empty path = the sync root itself
@@ -69,6 +72,7 @@ impl ApsCloudProvider {
             state_db,
             sync_root_id,
             upload_tx,
+            save_patterns,
             upload_dedup: Mutex::new(HashMap::new()),
         }
     }
@@ -213,8 +217,20 @@ impl CloudProvider for ApsCloudProvider {
     }
 
     fn resolve_folder_id(&self, relative_path: &Path) -> Result<Option<String>> {
-        let map = self.folder_map.lock().unwrap();
-        Ok(map.get(relative_path).cloned())
+        {
+            let map = self.folder_map.lock().unwrap();
+            if let Some(id) = map.get(relative_path).cloned() {
+                return Ok(Some(id));
+            }
+        }
+        let (db, root_id) = match (&self.state_db, &self.sync_root_id) {
+            (Some(db), Some(rid)) => (db, rid.as_str()),
+            _ => return Ok(None),
+        };
+        let rel = normalize_rel(relative_path);
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        let entry = db.get_file_entry_by_path(root_id, &rel)?;
+        Ok(entry.and_then(|row| if row.is_directory { row.cloud_item_id } else { None }))
     }
 
     fn register_folder_mapping(
@@ -345,6 +361,22 @@ impl CloudProvider for ApsCloudProvider {
         Ok(())
     }
 
+    fn note_archive_move(&self, old_relative: &Path, new_relative: &Path) -> Result<()> {
+        let old_rel = normalize_rel(old_relative);
+        let new_rel = normalize_rel(new_relative);
+        let mut save_patterns = self
+            .save_patterns
+            .lock()
+            .map_err(|e| anyhow::anyhow!("save_patterns lock: {e}"))?;
+        save_patterns.note_archive_move(old_rel.clone(), new_rel.clone());
+        tracing::info!(
+            "Recorded archive move for save coalescing: {} -> {}",
+            old_rel,
+            new_rel
+        );
+        Ok(())
+    }
+
     fn queue_upload_if_dirty(&self, local_full_path: PathBuf, cloud_item_id: &str) -> Result<()> {
         const DEBOUNCE: Duration = Duration::from_millis(400);
         let now = Instant::now();
@@ -383,14 +415,44 @@ impl CloudProvider for ApsCloudProvider {
             _ => return Ok(()),
         };
         let rel = normalize_rel(relative_path);
+        let full_path = {
+            let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+            let root = db
+                .get_sync_root(root_id)?
+                .ok_or_else(|| anyhow::anyhow!("Missing sync root {}", root_id))?;
+            PathBuf::from(root.local_path).join(relative_path)
+        };
+        let observed = std::fs::metadata(&full_path).ok().map(|meta| {
+            (
+                meta.modified().ok().map(system_time_to_rfc3339),
+                meta.len() as i64,
+            )
+        });
+
         let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
-        db.update_hydration_state(
-            root_id,
-            &rel,
-            "hydrated_ephemeral",
-            false,
-            Some("opened"),
-        )?;
+        if let Some((modified, size)) = observed {
+            // Hydration writes local bytes and updates the file mtime. Persist that observed
+            // state immediately so the local watcher does not mistake a read/open hydrate for a
+            // user edit and queue an upload.
+            db.update_local_observed_state(
+                root_id,
+                &rel,
+                modified.as_deref(),
+                Some(size),
+                "hydrated_ephemeral",
+                false,
+                "in_sync",
+                Some("opened"),
+            )?;
+        } else {
+            db.update_hydration_state(
+                root_id,
+                &rel,
+                "hydrated_ephemeral",
+                false,
+                Some("opened"),
+            )?;
+        }
         db.log_activity(
             "hydrate",
             Some(&rel),
@@ -437,6 +499,11 @@ impl CloudProvider for ApsCloudProvider {
         )?;
         Ok(())
     }
+}
+
+fn system_time_to_rfc3339(ts: SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Utc> = ts.into();
+    dt.to_rfc3339()
 }
 
 /// Recursively delete folder contents (files as Deleted versions; nested folders first).

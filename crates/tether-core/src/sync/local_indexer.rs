@@ -5,12 +5,14 @@ use std::thread;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use notify_debouncer_full::DebouncedEvent;
 use tokio::runtime::Handle;
 
 use crate::db::database::{FileEntryRow, SyncDatabase};
 use crate::sync::change_detector::{should_exclude, ChangeDetector};
 use crate::sync::parity::{offline_payload_json, OfflineJournalPayload, ServiceState};
 use crate::sync::queue::SyncQueue;
+use crate::sync::save_patterns::{is_old_versions_archive_path, SavePatternCoalescer};
 use crate::sync::task::{SyncOperation, SyncPriority, SyncTask};
 use crate::sync::worker::relative_under_root;
 
@@ -20,38 +22,219 @@ pub fn start(
     db: Arc<Mutex<SyncDatabase>>,
     queue: Arc<SyncQueue>,
     sync_root_id: String,
+    save_patterns: Arc<Mutex<SavePatternCoalescer>>,
 ) -> Result<ChangeDetector> {
     let (detector, rx) = ChangeDetector::start(&sync_root)?;
     let root_for_watch = sync_root.clone();
     let db_for_watch = db.clone();
     let queue_for_watch = queue.clone();
     let sync_root_for_watch = sync_root_id.clone();
+    let save_patterns_for_watch = save_patterns.clone();
 
     thread::spawn(move || {
         while let Ok(next) = rx.recv() {
-            if next.is_err() {
+            let Ok(events) = next else {
                 continue;
-            }
+            };
             let root = root_for_watch.clone();
             let db = db_for_watch.clone();
             let queue = queue_for_watch.clone();
             let sync_root_id = sync_root_for_watch.clone();
+            let save_patterns = save_patterns_for_watch.clone();
             runtime.block_on(async move {
-                let _ = reconcile_local_state(&root, &db, &queue, &sync_root_id).await;
+                let _ = reconcile_event_paths(
+                    &root,
+                    &db,
+                    &queue,
+                    &sync_root_id,
+                    &save_patterns,
+                    &events,
+                )
+                .await;
             });
         }
     });
 
     let repair_root = sync_root;
+    let save_patterns_for_repair = save_patterns;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
             interval.tick().await;
-            let _ = reconcile_local_state(&repair_root, &db, &queue, &sync_root_id).await;
+            let _ = reconcile_local_state(
+                &repair_root,
+                &db,
+                &queue,
+                &sync_root_id,
+                &save_patterns_for_repair,
+            )
+            .await;
         }
     });
 
     Ok(detector)
+}
+
+async fn reconcile_event_paths(
+    sync_root: &Path,
+    db: &Arc<Mutex<SyncDatabase>>,
+    queue: &Arc<SyncQueue>,
+    sync_root_id: &str,
+    save_patterns: &Arc<Mutex<SavePatternCoalescer>>,
+    events: &[DebouncedEvent],
+) -> Result<()> {
+    let mut changed_paths = HashSet::new();
+    for event in events {
+        for path in &event.paths {
+            if !path.starts_with(sync_root) {
+                continue;
+            }
+            changed_paths.insert(path.clone());
+        }
+    }
+    if changed_paths.is_empty() {
+        return Ok(());
+    }
+
+    let service_state = {
+        let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        let root = guard
+            .get_sync_root(sync_root_id)?
+            .ok_or_else(|| anyhow::anyhow!("Missing sync root {}", sync_root_id))?;
+        ServiceState::from_db(&root.service_state)
+    };
+    let online = matches!(service_state, ServiceState::Running | ServiceState::Reconnecting);
+    let db_rows = {
+        let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        guard.get_all_file_entries(sync_root_id)?
+    };
+    let known_by_rel: HashMap<String, FileEntryRow> = db_rows
+        .into_iter()
+        .map(|row| (row.local_relative_path.clone(), row))
+        .collect();
+    let pending_keys = pending_journal_keys(db, sync_root_id)?;
+    let deferred_archives = {
+        let mut guard = save_patterns
+            .lock()
+            .map_err(|e| anyhow::anyhow!("save_patterns lock: {e}"))?;
+        guard.clear_stale();
+        changed_paths
+            .iter()
+            .filter_map(|path| {
+                let rel = relative_under_root(sync_root, path);
+                if !is_old_versions_archive_path(Path::new(&rel)) || !guard.should_defer_archive(&rel) {
+                    return None;
+                }
+                let live_rel = guard.live_path_for_archive(&rel)?.to_string();
+                Some((rel, live_rel))
+            })
+            .collect::<Vec<_>>()
+    };
+    let prioritized_live_paths: HashSet<String> = deferred_archives
+        .iter()
+        .map(|(_, live_rel)| live_rel.clone())
+        .collect();
+
+    for path in changed_paths {
+        if should_exclude(&path) {
+            continue;
+        }
+        let rel = relative_under_root(sync_root, &path);
+        if path.is_dir() {
+            if rel.is_empty() {
+                continue;
+            }
+            if !known_by_rel.contains_key(&rel) {
+                queue_or_journal(
+                    sync_root,
+                    db,
+                    queue,
+                    sync_root_id,
+                    &rel,
+                    SyncOperation::CreateRemoteFolder,
+                    None,
+                    online,
+                    &pending_keys,
+                )
+                .await?;
+            }
+            continue;
+        }
+        if !path.is_file() || tether_cfapi::is_cloud_only_placeholder(&path) {
+            continue;
+        }
+        if let Some((_, live_rel)) = deferred_archives.iter().find(|(archive_rel, _)| archive_rel == &rel) {
+            tracing::info!(
+                "Deferring archive sync for {} until live file {} settles",
+                rel,
+                live_rel
+            );
+            continue;
+        }
+
+        match known_by_rel.get(&rel) {
+            None => {
+                if tether_cfapi::is_placeholder(&path) {
+                    continue;
+                }
+                tracing::info!("Detected new local file for remote create: {}", rel);
+                queue_or_journal(
+                    sync_root,
+                    db,
+                    queue,
+                    sync_root_id,
+                    &rel,
+                    SyncOperation::CreateRemoteFile,
+                    None,
+                    online,
+                    &pending_keys,
+                )
+                .await?;
+            }
+            Some(row) if row.cloud_item_id.is_some() => {
+                let sync_pending = tether_cfapi::is_sync_pending(&path);
+                if row.is_placeholder
+                    && row.hydration_state == "online_only"
+                    && !sync_pending
+                {
+                    tracing::debug!(
+                        "Ignoring placeholder hydration event for {} while local metadata settles",
+                        rel
+                    );
+                    continue;
+                }
+                let local_modified = std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(system_time_to_rfc3339);
+                let changed_since_last =
+                    local_modified.as_deref() != row.last_local_modified.as_deref();
+                if prioritized_live_paths.contains(&rel) || changed_since_last || sync_pending {
+                    tracing::info!(
+                        "Detected local change for {} (changed_since_last={}, sync_pending={})",
+                        rel,
+                        changed_since_last,
+                        sync_pending
+                    );
+                    queue_or_journal(
+                        sync_root,
+                        db,
+                        queue,
+                        sync_root_id,
+                        &rel,
+                        SyncOperation::Upload,
+                        row.cloud_item_id.clone(),
+                        online,
+                        &pending_keys,
+                    )
+                    .await?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn replay_operation_journal(
@@ -106,6 +289,7 @@ pub async fn reconcile_local_state(
     db: &Arc<Mutex<SyncDatabase>>,
     queue: &Arc<SyncQueue>,
     sync_root_id: &str,
+    save_patterns: &Arc<Mutex<SavePatternCoalescer>>,
 ) -> Result<()> {
     let service_state = {
         let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
@@ -131,6 +315,26 @@ pub async fn reconcile_local_state(
         .map(|row| (row.local_relative_path.clone(), row))
         .collect();
     let pending_keys = pending_journal_keys(db, sync_root_id)?;
+    let deferred_archives = {
+        let mut guard = save_patterns
+            .lock()
+            .map_err(|e| anyhow::anyhow!("save_patterns lock: {e}"))?;
+        guard.clear_stale();
+        local_files
+            .iter()
+            .filter_map(|rel| {
+                if !is_old_versions_archive_path(Path::new(rel)) || !guard.should_defer_archive(rel) {
+                    return None;
+                }
+                let live_rel = guard.live_path_for_archive(rel)?.to_string();
+                Some((rel.clone(), live_rel))
+            })
+            .collect::<Vec<_>>()
+    };
+    let prioritized_live_paths: HashSet<String> = deferred_archives
+        .iter()
+        .map(|(_, live_rel)| live_rel.clone())
+        .collect();
 
     for dir_rel in &local_dirs {
         if dir_rel.is_empty() {
@@ -153,6 +357,17 @@ pub async fn reconcile_local_state(
     }
 
     for file_rel in &local_files {
+        if let Some((_, live_rel)) = deferred_archives
+            .iter()
+            .find(|(archive_rel, _)| archive_rel == file_rel)
+        {
+            tracing::info!(
+                "Deferring archive sync for {} until live file {} settles",
+                file_rel,
+                live_rel
+            );
+            continue;
+        }
         let full = sync_root.join(file_rel.replace('/', "\\"));
         if tether_cfapi::is_cloud_only_placeholder(&full) {
             continue;
@@ -176,12 +391,33 @@ pub async fn reconcile_local_state(
                 .await?;
             }
             Some(row) if row.cloud_item_id.is_some() => {
-                let local_modified = std::fs::metadata(&full)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(system_time_to_rfc3339);
-                let changed_since_last = local_modified.as_deref() != row.last_local_modified.as_deref();
-                if changed_since_last || tether_cfapi::is_sync_pending(&full) {
+                if prioritized_live_paths.contains(file_rel) {
+                    tracing::info!(
+                        "Prioritizing live file upload after archive move: {}",
+                        file_rel
+                    );
+                    queue_or_journal(
+                        sync_root,
+                        db,
+                        queue,
+                        sync_root_id,
+                        file_rel,
+                        SyncOperation::Upload,
+                        row.cloud_item_id.clone(),
+                        online,
+                        &pending_keys,
+                    )
+                    .await?;
+                    continue;
+                }
+                let sync_pending = tether_cfapi::is_sync_pending(&full);
+                if sync_pending {
+                    tracing::info!(
+                        "Detected local change for {} (changed_since_last={}, sync_pending={})",
+                        file_rel,
+                        false,
+                        sync_pending
+                    );
                     queue_or_journal(
                         sync_root,
                         db,
@@ -278,17 +514,14 @@ fn collect_paths(
         if should_exclude(&path) {
             continue;
         }
-        if tether_cfapi::is_cloud_only_placeholder(&path) {
-            continue;
-        }
         let rel = relative_under_root(root, &path);
         if path.is_dir() {
-            if tether_cfapi::is_placeholder(&path) {
-                continue;
-            }
             dirs.push(rel.clone());
             collect_paths(root, &path, dirs, files)?;
         } else if path.is_file() {
+            if tether_cfapi::is_cloud_only_placeholder(&path) {
+                continue;
+            }
             files.push(rel);
         }
     }

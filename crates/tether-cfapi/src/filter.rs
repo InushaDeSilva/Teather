@@ -11,11 +11,6 @@ use std::sync::Arc;
 
 use crate::provider::CloudProvider;
 
-pub struct TetherSyncFilter {
-    pub root_path: PathBuf,
-    pub provider: Arc<dyn CloudProvider>,
-}
-
 fn is_old_versions_archive_path(path: &std::path::Path) -> bool {
     path.components().any(|component| {
         component
@@ -24,6 +19,11 @@ fn is_old_versions_archive_path(path: &std::path::Path) -> bool {
             .map(|s| s.eq_ignore_ascii_case("OldVersions"))
             .unwrap_or(false)
     })
+}
+
+pub struct TetherSyncFilter {
+    pub root_path: PathBuf,
+    pub provider: Arc<dyn CloudProvider>,
 }
 
 impl TetherSyncFilter {
@@ -324,6 +324,9 @@ impl SyncFilter for TetherSyncFilter {
             .unwrap_or_else(|_| PathBuf::new());
 
         if !info.is_directory() && is_old_versions_archive_path(&relative_new) {
+            if let Err(e) = self.provider.note_archive_move(&relative_old, &relative_new) {
+                tracing::warn!("note_archive_move failed: {}", e);
+            }
             tracing::info!(
                 "rename: treating archive move as local-only {} -> {}",
                 relative_old.display(),

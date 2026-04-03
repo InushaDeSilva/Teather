@@ -16,6 +16,7 @@ use super::change_detector::ChangeDetector;
 use super::local_indexer;
 use super::parity::ServiceState;
 use super::queue::SyncQueue;
+use super::save_patterns::SavePatternCoalescer;
 
 /// Overall sync status for UI display.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -201,6 +202,7 @@ impl SyncEngine {
         self.current_root_folder_id = Some(root_folder_id.clone());
 
         let (upload_tx, mut upload_rx) = tokio::sync::mpsc::unbounded_channel();
+        let save_patterns = Arc::new(Mutex::new(SavePatternCoalescer::new()));
         let queue_upload = self.queue.clone();
         let root_upload = sync_root.clone();
         let sr_upload = sync_root_db_id.clone();
@@ -228,6 +230,7 @@ impl SyncEngine {
             Some(self.db.clone()),
             Some(sync_root_db_id.clone()),
             upload_tx,
+            save_patterns.clone(),
         ));
 
         let provider_name = format!("Tether - {}", project_name);
@@ -354,9 +357,18 @@ impl SyncEngine {
             self.db.clone(),
             self.queue.clone(),
             sync_root_db_id.clone(),
+            save_patterns.clone(),
         )?);
 
         self.set_service_state(ServiceState::Running).await?;
+        local_indexer::reconcile_local_state(
+            &sync_root,
+            &self.db,
+            &self.queue,
+            &sync_root_db_id,
+            &save_patterns,
+        )
+        .await?;
         Ok(())
     }
 

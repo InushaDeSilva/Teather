@@ -53,6 +53,7 @@ pub async fn start_workers(
                     Err(e) => {
                         warn!("Worker {} task {} auth error: {} — retry later", i, task.id, e);
                         task.not_before = Some(Instant::now() + Duration::from_secs(2));
+                        q.finish(&task).await;
                         q.push(task).await;
                         continue;
                     }
@@ -64,6 +65,7 @@ pub async fn start_workers(
                         Err(_) => {
                             warn!("Upload semaphore closed; re-queue task {}", task.id);
                             task.not_before = Some(Instant::now() + Duration::from_millis(200));
+                            q.finish(&task).await;
                             q.push(task).await;
                             continue;
                         }
@@ -78,6 +80,7 @@ pub async fn start_workers(
                         Err(_) => {
                             warn!("Download semaphore closed; re-queue task {}", task.id);
                             task.not_before = Some(Instant::now() + Duration::from_millis(200));
+                            q.finish(&task).await;
                             q.push(task).await;
                             continue;
                         }
@@ -90,16 +93,19 @@ pub async fn start_workers(
                     Ok(_) => {
                         complete_journal(&db, &task);
                         info!("Task completed: {:?}", task.operation);
+                        q.finish(&task).await;
                     }
                     Err(e) => {
                         error!("Task failed: {:?} - {}", task.operation, e);
                         task.retry_count += 1;
                         if task.retry_count < 5 {
                             task.not_before = Some(Instant::now() + task.backoff_duration());
+                            q.finish(&task).await;
                             q.push(task).await;
                         } else {
                             error!("Task exceeded max retries: {:?}", task.operation);
                             fail_journal(&db, &task, &e.to_string());
+                            q.finish(&task).await;
                         }
                     }
                 }

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 // ── Sync operations ──
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SyncOperation {
     Download,
     Upload,
