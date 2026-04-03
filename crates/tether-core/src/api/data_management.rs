@@ -232,6 +232,19 @@ impl ApsDataManagementClient {
         Ok(all_items)
     }
 
+    pub async fn find_folder_entry_by_name(
+        &self,
+        token: &str,
+        project_id: &str,
+        folder_id: &str,
+        entry_name: &str,
+    ) -> Result<Option<Item>> {
+        let items = self.get_folder_contents(token, project_id, folder_id).await?;
+        Ok(items
+            .into_iter()
+            .find(|item| item.attributes.display_name.eq_ignore_ascii_case(entry_name)))
+    }
+
     /// GET /data/v1/projects/{projectId}/items/{itemId}/versions
     pub async fn get_item_versions(
         &self,
@@ -335,6 +348,53 @@ impl ApsDataManagementClient {
         }
 
         let result: JsonApiResponse<Item> = resp.json().await?;
+        Ok(result.data)
+    }
+
+    /// Create a subfolder inside a parent folder.
+    /// POST /data/v1/projects/{projectId}/folders
+    pub async fn create_folder(
+        &self,
+        token: &str,
+        project_id: &str,
+        parent_folder_id: &str,
+        folder_name: &str,
+    ) -> Result<Folder> {
+        let url = format!("{BASE_URL}/data/v1/projects/{project_id}/folders");
+        let body = serde_json::json!({
+            "jsonapi": { "version": "1.0" },
+            "data": {
+                "type": "folders",
+                "attributes": {
+                    "name": folder_name,
+                    "extension": {
+                        "type": "folders:autodesk.bim360:Folder",
+                        "version": "1.0"
+                    }
+                },
+                "relationships": {
+                    "parent": {
+                        "data": { "type": "folders", "id": parent_folder_id }
+                    }
+                }
+            }
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Create folder failed ({}): {}", status, text);
+        }
+
+        let result: JsonApiResponse<Folder> = resp.json().await?;
         Ok(result.data)
     }
 

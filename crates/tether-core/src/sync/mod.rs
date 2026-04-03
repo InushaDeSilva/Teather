@@ -5,6 +5,8 @@ pub mod conflict;
 pub mod diagnostics;
 pub mod engine;
 pub mod hasher;
+pub mod local_indexer;
+pub mod parity;
 pub mod queue;
 pub mod reference;
 pub mod save_patterns;

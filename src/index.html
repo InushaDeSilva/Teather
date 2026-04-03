@@ -46,6 +46,7 @@
                     <div>
                         <strong id="status-text">Up to date</strong>
                         <p id="last-sync" class="meta">Last synced: just now</p>
+                        <p id="service-state" class="meta">Service: disabled</p>
                     </div>
                 </div>
             </div>
@@ -69,6 +70,21 @@
             <div class="actions">
                 <button id="btn-open-folder" class="btn btn-secondary">📁 Open sync folder</button>
                 <button id="btn-pause" class="btn btn-secondary">⏸ Pause syncing</button>
+                <button id="btn-service" class="btn btn-secondary">📡 Go offline</button>
+            </div>
+
+            <div class="card">
+                <h3>Prompts &amp; Offline Queue</h3>
+                <p class="meta">Conflict resolution, delete confirmations, and queued offline operations.</p>
+                <div id="prompt-list" class="prompt-list">
+                    <p class="meta">No prompts waiting.</p>
+                </div>
+                <div style="margin-top:12px;">
+                    <h3 style="margin-bottom:8px;">Offline journal</h3>
+                    <ul id="journal-list" class="activity-list">
+                        <li class="empty">No offline operations queued</li>
+                    </ul>
+                </div>
             </div>
 
             <div class="card">
@@ -321,6 +337,7 @@
             document.getElementById('status-view').classList.add('active');
             loadTroubleshooter();
             loadIpj();
+            loadPromptCenter();
         }
 
         async function loadTroubleshooter() {
@@ -346,6 +363,79 @@
                 const p = await invoke('get_inventor_ipj');
                 if (p) document.getElementById('ipj-input').value = p;
             } catch (_) {}
+        }
+
+        async function resolvePrompt(id, resolution) {
+            try {
+                await invoke('resolve_pending_prompt', { promptId: id, resolution });
+                await loadPromptCenter();
+                await pollStatus();
+                await loadTroubleshooter();
+            } catch (e) {
+                alert('Prompt resolution failed: ' + e);
+            }
+        }
+
+        async function loadPromptCenter() {
+            const promptList = document.getElementById('prompt-list');
+            const journalList = document.getElementById('journal-list');
+            try {
+                const prompts = await invoke('list_pending_prompts');
+                promptList.innerHTML = '';
+                if (!prompts.length) {
+                    promptList.innerHTML = '<p class="meta">No prompts waiting.</p>';
+                } else {
+                    for (const prompt of prompts) {
+                        const wrap = document.createElement('div');
+                        wrap.className = 'prompt-card';
+                        wrap.innerHTML = `
+                            <strong>${prompt.kind.replaceAll('_', ' ')}</strong>
+                            <p>${prompt.message}</p>
+                            <p class="meta">${prompt.relative_path}</p>
+                        `;
+                        const actions = document.createElement('div');
+                        actions.className = 'prompt-actions';
+
+                        const buttons = prompt.kind === 'delete_confirm'
+                            ? [
+                                ['Delete Local', 'delete_local_only'],
+                                ['Delete Local + Cloud', 'delete_local_and_cloud'],
+                                ['Cancel', 'cancel'],
+                            ]
+                            : [
+                                ['Keep Both', 'keep_both'],
+                                ['Keep Local', 'keep_local'],
+                                ['Keep Cloud', 'keep_cloud'],
+                                ['Cancel', 'cancel'],
+                            ];
+
+                        for (const [label, value] of buttons) {
+                            const btn = document.createElement('button');
+                            btn.className = 'btn btn-secondary btn-small';
+                            btn.textContent = label;
+                            btn.onclick = () => resolvePrompt(prompt.id, value);
+                            actions.appendChild(btn);
+                        }
+                        wrap.appendChild(actions);
+                        promptList.appendChild(wrap);
+                    }
+                }
+
+                const journal = await invoke('list_operation_journal');
+                journalList.innerHTML = '';
+                if (!journal.length) {
+                    journalList.innerHTML = '<li class="empty">No offline operations queued</li>';
+                } else {
+                    for (const row of journal) {
+                        const li = document.createElement('li');
+                        li.textContent = `${row.operation_type} — ${row.relative_path || '(root)'} [${row.status}]`;
+                        journalList.appendChild(li);
+                    }
+                }
+            } catch (e) {
+                promptList.innerHTML = '<p class="error">Prompt center error: ' + e + '</p>';
+                journalList.innerHTML = '<li class="empty">Unable to load offline queue</li>';
+            }
         }
 
         async function loadProjects(hubId, selectedElement) {
@@ -391,6 +481,16 @@
                 const resp = await invoke('get_sync_status');
                 const statusText = document.getElementById('status-text');
                 const statusIcon = document.getElementById('status-icon');
+                const serviceState = document.getElementById('service-state');
+                const serviceButton = document.getElementById('btn-service');
+                if (serviceState) {
+                    serviceState.textContent = 'Service: ' + (resp.service_state || 'unknown');
+                }
+                if (serviceButton) {
+                    serviceButton.textContent = (resp.service_state === 'offline' || resp.service_state === 'disabled')
+                        ? '📡 Go online'
+                        : '📡 Go offline';
+                }
 
                 const summary = document.getElementById('queue-summary');
                 const qList = document.getElementById('queue-jobs');
@@ -451,6 +551,13 @@
                 btn.textContent = '⏸ Pause syncing';
             }
         });
+        document.getElementById('btn-service')?.addEventListener('click', async () => {
+            const label = document.getElementById('btn-service').textContent || '';
+            const next = label.includes('online') ? 'running' : 'offline';
+            await invoke('set_service_state', { serviceState: next });
+            await pollStatus();
+            await loadPromptCenter();
+        });
 
         document.getElementById('btn-trouble-report')?.addEventListener('click', loadTroubleshooter);
         document.getElementById('btn-diagnostics')?.addEventListener('click', async () => {
@@ -473,7 +580,10 @@
         });
 
         // Poll status every 5 seconds
-        setInterval(pollStatus, 5000);
+        setInterval(async () => {
+            await pollStatus();
+            await loadPromptCenter();
+        }, 5000);
     </script>
 </body>
 </html>

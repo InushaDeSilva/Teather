@@ -214,7 +214,6 @@ impl SyncFilter for TetherSyncFilter {
             return Err(CloudErrorKind::InvalidRequest);
         }
 
-        // Write only the range Windows requested (may be full file or a chunk).
         let start = required_range.start as usize;
         let end = (required_range.end as usize).min(data.len());
         if start >= end {
@@ -227,21 +226,20 @@ impl SyncFilter for TetherSyncFilter {
             return Err(CloudErrorKind::InvalidRequest);
         }
 
-        let write_res = if start == 0 && end == data.len() {
-            ticket.write_at(&data, 0)
-        } else {
-            ticket.write_at(&data[start..end], required_range.start)
-        };
+        // We already downloaded the full file from OSS, so materialize the whole payload in one
+        // transfer. This is more reliable for CAD/assembly formats than leaving the file partially
+        // hydrated across multiple callback rounds.
+        let write_res = ticket.write_at(&data, 0);
 
         write_res.map_err(|e| {
             tracing::error!("ticket.write_at failed: {}", e);
             CloudErrorKind::InvalidRequest
         })?;
 
-        let _ = ticket.report_progress(file_size, end as u64);
+        let _ = ticket.report_progress(file_size, file_size);
 
         tracing::info!(
-            "fetch_data: wrote range {}..{} of {} ({} bytes logical) for {}",
+            "fetch_data: wrote full file after request range {}..{} of {} ({} bytes logical) for {}",
             start,
             end,
             cloud_item_id,
@@ -249,18 +247,15 @@ impl SyncFilter for TetherSyncFilter {
             full_path.display()
         );
 
-        // Only notify after the last chunk — otherwise DB/state thinks the file is complete early.
-        if end == fs {
-            let rel = match full_path.strip_prefix(&self.root_path) {
-                Ok(p) => p,
-                Err(_) => full_path.as_path(),
-            };
-            if let Err(e) = self
-                .provider
-                .on_hydration_complete(&cloud_item_id, rel)
-            {
-                tracing::warn!("on_hydration_complete failed: {}", e);
-            }
+        let rel = match full_path.strip_prefix(&self.root_path) {
+            Ok(p) => p,
+            Err(_) => full_path.as_path(),
+        };
+        if let Err(e) = self
+            .provider
+            .on_hydration_complete(&cloud_item_id, rel)
+        {
+            tracing::warn!("on_hydration_complete failed: {}", e);
         }
 
         Ok(())
@@ -288,28 +283,24 @@ impl SyncFilter for TetherSyncFilter {
         }
 
         let path = request.path();
-        let display_name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        // Best-effort cloud delete, then always ACK the local delete. Returning `Err` here causes
-        // cloud-filter to call `Delete::fail(..).unwrap()`, which can panic with HRESULT 0x8007018E
-        // when Windows rejects the chosen completion status.
-        if info.is_directory() {
-            if let Err(e) = self.provider.delete_cloud_folder_recursive(cloud_id) {
-                tracing::warn!(
-                    "delete_cloud_folder_recursive failed (local delete still applied): {e:#}"
-                );
-            }
-        } else if let Err(e) = self.provider.delete_cloud_item(cloud_id, display_name) {
-            tracing::warn!("delete_cloud_item failed (local delete still applied): {e:#}");
+        let relative = path
+            .strip_prefix(&self.root_path)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| PathBuf::new());
+        if let Err(e) = self
+            .provider
+            .queue_delete_prompt(&relative, cloud_id, info.is_directory())
+        {
+            tracing::error!("queue_delete_prompt failed: {e:#}");
+            return Err(CloudErrorKind::NetworkUnavailable);
         }
 
-        ticket.pass().map_err(|e| {
-            tracing::error!("ticket.pass delete: {:?}", e);
-            CloudErrorKind::InvalidRequest
-        })
+        tracing::info!(
+            "delete blocked pending prompt for {}",
+            path.display()
+        );
+        let _ = ticket;
+        Err(CloudErrorKind::NotSupported)
     }
 
     /// User renamed/moved a placeholder — propagate to cloud, then acknowledge.

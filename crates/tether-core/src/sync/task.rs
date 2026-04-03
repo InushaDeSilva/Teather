@@ -11,7 +11,11 @@ use uuid::Uuid;
 pub enum SyncOperation {
     Download,
     Upload,
-    Delete,
+    CreateRemoteFolder,
+    CreateRemoteFile,
+    DeleteLocal,
+    DeleteCloud,
+    GetLatestVersion,
     Rename { new_name: String },
     CreateFolder,
 }
@@ -52,6 +56,8 @@ pub struct SyncTask {
     pub local_path: PathBuf,
     pub cloud_item_id: Option<String>,
     pub cloud_folder_id: Option<String>,
+    pub destination_path: Option<PathBuf>,
+    pub journal_id: Option<String>,
     /// SQLite sync_roots.id for this job (parity / DB updates).
     pub sync_root_id: Option<String>,
     pub sync_root_path: Option<PathBuf>,
@@ -76,6 +82,8 @@ impl SyncTask {
             local_path,
             cloud_item_id: None,
             cloud_folder_id: None,
+            destination_path: None,
+            journal_id: None,
             sync_root_id: None,
             sync_root_path: None,
             retry_count: 0,

@@ -12,6 +12,9 @@ use crate::api::storage::ApsStorageClient;
 use crate::config::settings::AppSettings;
 use crate::db::database::SyncDatabase;
 
+use super::change_detector::ChangeDetector;
+use super::local_indexer;
+use super::parity::ServiceState;
 use super::queue::SyncQueue;
 
 /// Overall sync status for UI display.
@@ -33,6 +36,7 @@ pub struct SyncEngine {
     pub db: Arc<Mutex<SyncDatabase>>,
     pub queue: Arc<SyncQueue>,
     pub status: SyncStatus,
+    pub service_state: ServiceState,
     pub sync_root_path: Option<PathBuf>,
     /// Row id in `sync_roots` for the active session.
     pub sync_root_db_id: Option<String>,
@@ -40,15 +44,13 @@ pub struct SyncEngine {
     pub current_project_id: Option<String>,
     pub current_root_folder_id: Option<String>,
     pub cf_connection: Option<tether_cfapi::Connection<tether_cfapi::TetherSyncFilter>>,
+    local_change_detector: Option<ChangeDetector>,
     paused: bool,
 }
 
 impl SyncEngine {
     pub fn new(settings: AppSettings) -> Result<Self> {
-        let auth = ApsAuthClient::new(
-            settings.client_id.clone(),
-            settings.redirect_uri.clone(),
-        );
+        let auth = ApsAuthClient::new(settings.client_id.clone(), settings.redirect_uri.clone());
         let data_mgmt = ApsDataManagementClient::new();
         let storage = ApsStorageClient::new();
         let db = Arc::new(Mutex::new(SyncDatabase::open_default()?));
@@ -64,18 +66,24 @@ impl SyncEngine {
             db,
             queue,
             status: SyncStatus::Idle,
+            service_state: ServiceState::Disabled,
             sync_root_path: None,
             sync_root_db_id: None,
             current_hub_id: None,
             current_project_id: None,
             current_root_folder_id: None,
             cf_connection: None,
+            local_change_detector: None,
             paused: false,
         })
     }
 
     pub fn current_status(&self) -> SyncStatus {
         self.status.clone()
+    }
+
+    pub fn current_service_state(&self) -> ServiceState {
+        self.service_state.clone()
     }
 
     pub fn sync_root_path(&self) -> Option<PathBuf> {
@@ -88,18 +96,53 @@ impl SyncEngine {
         info!("Sync paused");
     }
 
-    pub fn resume(&mut self) {
+    pub async fn resume(&mut self) -> Result<()> {
         self.paused = false;
         self.status = SyncStatus::Idle;
+        self.set_service_state(ServiceState::Running).await?;
         info!("Sync resumed");
+        Ok(())
+    }
+
+    pub async fn set_service_state(&mut self, service_state: ServiceState) -> Result<()> {
+        self.service_state = service_state.clone();
+        self.status = match service_state {
+            ServiceState::Offline => SyncStatus::Offline,
+            ServiceState::Disabled => SyncStatus::Paused,
+            ServiceState::Error => SyncStatus::Error {
+                message: "Service error".into(),
+            },
+            _ => SyncStatus::Idle,
+        };
+        if let Some(sync_root_id) = &self.sync_root_db_id {
+            let db = self.db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+            db.update_sync_root_service_state(sync_root_id, service_state.as_str())?;
+        }
+        if matches!(service_state, ServiceState::Running | ServiceState::Reconnecting) {
+            if let (Some(sync_root), Some(sync_root_id)) =
+                (&self.sync_root_path, &self.sync_root_db_id)
+            {
+                let replayed = local_indexer::replay_operation_journal(
+                    sync_root,
+                    &self.db,
+                    &self.queue,
+                    sync_root_id,
+                )
+                .await?;
+                if replayed > 0 {
+                    info!("Replayed {} offline journal operation(s)", replayed);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn start(
-        &mut self, 
-        hub_id: &str, 
-        project_id: &str, 
+        &mut self,
+        hub_id: &str,
+        project_id: &str,
         project_name: &str,
-        folder_id: Option<String>
+        folder_id: Option<String>,
     ) -> Result<()> {
         info!("Starting sync for project: {} ({})", project_name, project_id);
         if let Some(ref fid) = folder_id {
@@ -110,32 +153,36 @@ impl SyncEngine {
         let sync_root = std::path::PathBuf::from(local_app_data)
             .join("Tether")
             .join("Sync")
-            .join(project_name.replace(|c: char| !c.is_alphanumeric() && c != ' ' && c != '-' && c != '_', ""));
+            .join(project_name.replace(
+                |c: char| !c.is_alphanumeric() && c != ' ' && c != '-' && c != '_',
+                "",
+            ));
 
         std::fs::create_dir_all(&sync_root)?;
         self.sync_root_path = Some(sync_root.clone());
         self.status = SyncStatus::Idle;
 
-        // Use provided folder_id, or find "Project Files", or fallback to first
         let root_folder_id = if let Some(fid) = folder_id {
             fid
         } else {
-            // Discover top-level folders to find a default
-            let token = self.auth.get_access_token().map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
-            let folders = self.data_mgmt.get_top_folders(&token, hub_id, project_id).await?;
+            let token = self
+                .auth
+                .get_access_token()
+                .map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
+            let folders = self
+                .data_mgmt
+                .get_top_folders(&token, hub_id, project_id)
+                .await?;
 
-            info!("Found {} top-level folders for project.", folders.len());
-            for f in &folders {
-                info!(" - Folder ID: {}, Name: {}", f.id, f.attributes.display_name);
-            }
-
-            let project_files_folder = folders.iter().find(|f| {
-                f.attributes.display_name.contains("Project Files")
-            }).or_else(|| folders.first()).cloned();
+            let project_files_folder = folders
+                .iter()
+                .find(|f| f.attributes.display_name.contains("Project Files"))
+                .or_else(|| folders.first())
+                .cloned();
 
             let root_folder = project_files_folder
                 .ok_or_else(|| anyhow::anyhow!("No 'Project Files' folder found in project!"))?;
-            
+
             root_folder.id.clone()
         };
 
@@ -172,7 +219,6 @@ impl SyncEngine {
             }
         });
 
-        // ── Build the CloudProvider for CFAPI callbacks ──
         let provider = std::sync::Arc::new(super::cfapi_provider::ApsCloudProvider::new(
             tokio::runtime::Handle::current(),
             self.auth.clone(),
@@ -185,15 +231,12 @@ impl SyncEngine {
             upload_tx,
         ));
 
-        // ── Register and connect the Windows Cloud Files virtual drive ──
         let provider_name = format!("Tether - {}", project_name);
         tether_cfapi::register_sync_root(&provider_name, "1.0.0", &sync_root)?;
-
         let connection = tether_cfapi::connect_sync_root(&sync_root, provider)?;
         self.cf_connection = Some(connection);
         info!("CFAPI virtual drive connected at {:?}", sync_root);
 
-        // ── Start background workers for queue-based tasks ──
         super::worker::start_workers(
             2,
             self.queue.clone(),
@@ -202,12 +245,11 @@ impl SyncEngine {
             self.auth.clone(),
             self.db.clone(),
             project_id.to_string(),
-        ).await;
+        )
+        .await;
 
-        // Purge any stale download tasks from previous sessions / old poller logic.
         self.queue.clear_downloads().await;
 
-        // ── Cloud poller — detects remote changes for proactive placeholder updates ──
         {
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
@@ -217,11 +259,12 @@ impl SyncEngine {
             let pid = project_id.to_string();
             let fid = root_folder_id;
             let poll_root_id = sync_root_db_id.clone();
-
             let poll_sync_root = sync_root.clone();
+            let interval_secs = self.settings.sync_interval_secs;
+
             tokio::spawn(async move {
                 super::cloud_poller::start_polling(
-                    30,
+                    interval_secs,
                     data_clone,
                     db_clone,
                     move || auth_clone.get_access_token().map_err(|e| anyhow::anyhow!("{e}")),
@@ -230,10 +273,11 @@ impl SyncEngine {
                     poll_root_id,
                     poll_sync_root,
                     tx,
-                ).await;
+                )
+                .await;
             });
 
-            let root_clone = sync_root;
+            let root_clone = sync_root.clone();
             tokio::spawn(async move {
                 while let Some(change) = rx.recv().await {
                     match change {
@@ -248,8 +292,6 @@ impl SyncEngine {
                             }
                             if let Some(parent) = full.parent() {
                                 if !parent.exists() {
-                                    // Parent folder not visited yet — placeholder will be
-                                    // created lazily by fetch_placeholders when user navigates.
                                     continue;
                                 }
                                 let file_name = full
@@ -284,7 +326,7 @@ impl SyncEngine {
                                         local_relative_path
                                     );
                                 }
-                                Ok(false) => {} // already cloud-only
+                                Ok(false) => {}
                                 Err(e) => {
                                     tracing::warn!(
                                         "Failed to dehydrate {}: {e:#}",
@@ -299,12 +341,7 @@ impl SyncEngine {
                         } => {
                             let full = root_clone.join(local_relative_path.replace('/', "\\"));
                             if full.exists() {
-                                if let Err(e) = std::fs::remove_file(&full) {
-                                    tracing::warn!(
-                                        "Failed to remove placeholder {}: {e:#}",
-                                        local_relative_path
-                                    );
-                                }
+                                let _ = std::fs::remove_file(&full);
                             }
                         }
                     }
@@ -312,84 +349,19 @@ impl SyncEngine {
             });
         }
 
-        // ── Periodic local scanner — picks up "sync pending" files and queues uploads ──
-        {
-            let scan_root = self.sync_root_path.clone().unwrap();
-            let scan_db = self.db.clone();
-            let scan_queue = self.queue.clone();
-            let scan_sr_id = sync_root_db_id.clone();
+        self.local_change_detector = Some(local_indexer::start(
+            tokio::runtime::Handle::current(),
+            sync_root.clone(),
+            self.db.clone(),
+            self.queue.clone(),
+            sync_root_db_id.clone(),
+        )?);
 
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-                loop {
-                    interval.tick().await;
-                    scan_pending_uploads(&scan_root, &scan_db, &scan_sr_id, &scan_queue).await;
-                }
-            });
-        }
-
+        self.set_service_state(ServiceState::Running).await?;
         Ok(())
     }
 
     pub fn is_paused(&self) -> bool {
         self.paused
-    }
-}
-
-/// Walk the sync root, find files Explorer marks "Sync pending", queue uploads.
-async fn scan_pending_uploads(
-    sync_root: &std::path::Path,
-    db: &std::sync::Arc<std::sync::Mutex<crate::db::database::SyncDatabase>>,
-    sync_root_id: &str,
-    queue: &std::sync::Arc<super::queue::SyncQueue>,
-) {
-    let mut stack = vec![sync_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-
-            if !tether_cfapi::is_sync_pending(&path) {
-                continue;
-            }
-
-            let rel = path
-                .strip_prefix(sync_root)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-
-            let cloud_item_id = {
-                let db = match db.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
-                db.get_file_entry_by_path(sync_root_id, &rel)
-                    .ok()
-                    .flatten()
-                    .and_then(|e| e.cloud_item_id)
-            };
-
-            let item_id = match cloud_item_id {
-                Some(id) => id,
-                None => continue,
-            };
-
-            let mut task = super::task::SyncTask::new(
-                super::task::SyncOperation::Upload,
-                super::task::SyncPriority::Normal,
-                path.clone(),
-            );
-            task.cloud_item_id = Some(item_id);
-            task.sync_root_id = Some(sync_root_id.to_string());
-            task.sync_root_path = Some(sync_root.to_path_buf());
-            queue.push(task).await;
-        }
     }
 }

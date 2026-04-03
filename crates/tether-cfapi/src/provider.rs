@@ -94,4 +94,14 @@ pub trait CloudProvider: Send + Sync {
     ) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+
+    /// Stage a delete confirmation prompt instead of deleting immediately.
+    fn queue_delete_prompt(
+        &self,
+        _relative_path: &Path,
+        _cloud_id: &str,
+        _is_directory: bool,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

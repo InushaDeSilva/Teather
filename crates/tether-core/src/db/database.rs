@@ -62,7 +62,7 @@ impl SyncDatabase {
     pub fn get_sync_root(&self, id: &str) -> Result<Option<SyncRootRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, hub_id, project_id, folder_id, local_path, display_name, last_full_sync,
-                    COALESCE(delete_prompt_pending, 0), last_poll_at
+                    COALESCE(delete_prompt_pending, 0), last_poll_at, COALESCE(service_state, 'disabled')
              FROM sync_roots WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![id], |row| Self::map_sync_root(row))?;
@@ -72,7 +72,7 @@ impl SyncDatabase {
     pub fn get_active_sync_roots(&self) -> Result<Vec<SyncRootRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, hub_id, project_id, folder_id, local_path, display_name, last_full_sync,
-                    COALESCE(delete_prompt_pending, 0), last_poll_at
+                    COALESCE(delete_prompt_pending, 0), last_poll_at, COALESCE(service_state, 'disabled')
              FROM sync_roots WHERE is_active = 1",
         )?;
         let rows = stmt.query_map([], |row| Self::map_sync_root(row))?;
@@ -90,7 +90,16 @@ impl SyncDatabase {
             last_full_sync: row.get(6)?,
             delete_prompt_pending: row.get::<_, i64>(7)? != 0,
             last_poll_at: row.get(8)?,
+            service_state: row.get(9)?,
         })
+    }
+
+    pub fn update_sync_root_service_state(&self, id: &str, service_state: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sync_roots SET service_state = ?1 WHERE id = ?2",
+            rusqlite::params![service_state, id],
+        )?;
+        Ok(())
     }
 
     // ── File entries ──
@@ -268,6 +277,14 @@ impl SyncDatabase {
         Ok(())
     }
 
+    pub fn remove_file_entry(&self, sync_root_id: &str, relative_path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM file_entries WHERE sync_root_id = ?1 AND local_relative_path = ?2",
+            rusqlite::params![sync_root_id, relative_path],
+        )?;
+        Ok(())
+    }
+
     // ── Inventor IPJ ──
 
     pub fn set_inventor_ipj(&self, sync_root_id: &str, ipj_path: Option<&str>) -> Result<()> {
@@ -295,19 +312,20 @@ impl SyncDatabase {
         sync_root_id: &str,
         job_type: &str,
         payload_json: Option<&str>,
+        recovery_path: Option<&str>,
     ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO pending_jobs (id, sync_root_id, job_type, payload_json, status)
-             VALUES (?1, ?2, ?3, ?4, 'queued')",
-            rusqlite::params![id, sync_root_id, job_type, payload_json],
+            "INSERT INTO pending_jobs (id, sync_root_id, job_type, payload_json, status, recovery_path)
+             VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
+            rusqlite::params![id, sync_root_id, job_type, payload_json, recovery_path],
         )?;
         Ok(id)
     }
 
     pub fn list_pending_jobs(&self, status: &str, limit: usize) -> Result<Vec<PendingJobRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, sync_root_id, job_type, payload_json, status, details, created_at
+            "SELECT id, sync_root_id, job_type, payload_json, status, details, recovery_path, created_at
              FROM pending_jobs WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![status, limit], |row| {
@@ -318,10 +336,149 @@ impl SyncDatabase {
                 payload_json: row.get(3)?,
                 status: row.get(4)?,
                 details: row.get(5)?,
-                created_at: row.get(6)?,
+                recovery_path: row.get(6)?,
+                created_at: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_pending_job(&self, id: &str) -> Result<Option<PendingJobRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sync_root_id, job_type, payload_json, status, details, recovery_path, created_at
+             FROM pending_jobs WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| {
+            Ok(PendingJobRow {
+                id: row.get(0)?,
+                sync_root_id: row.get(1)?,
+                job_type: row.get(2)?,
+                payload_json: row.get(3)?,
+                status: row.get(4)?,
+                details: row.get(5)?,
+                recovery_path: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn update_pending_job(
+        &self,
+        id: &str,
+        status: &str,
+        details: Option<&str>,
+        recovery_path: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pending_jobs
+             SET status = ?1,
+                 details = COALESCE(?2, details),
+                 recovery_path = COALESCE(?3, recovery_path)
+             WHERE id = ?4",
+            rusqlite::params![status, details, recovery_path, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_operation_journal(
+        &self,
+        sync_root_id: &str,
+        operation_type: &str,
+        relative_path: Option<&str>,
+        payload_json: Option<&str>,
+        recovery_path: Option<&str>,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO operation_journal
+                (id, sync_root_id, operation_type, relative_path, payload_json, status, recovery_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6)",
+            rusqlite::params![
+                id,
+                sync_root_id,
+                operation_type,
+                relative_path,
+                payload_json,
+                recovery_path
+            ],
+        )?;
+        Ok(id)
+    }
+
+    pub fn list_operation_journal(
+        &self,
+        sync_root_id: &str,
+        status: &str,
+        limit: usize,
+    ) -> Result<Vec<OperationJournalRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, sync_root_id, operation_type, relative_path, payload_json, status,
+                    recovery_path, created_at, updated_at
+             FROM operation_journal
+             WHERE sync_root_id = ?1 AND status = ?2
+             ORDER BY created_at ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![sync_root_id, status, limit], |row| {
+            Ok(OperationJournalRow {
+                id: row.get(0)?,
+                sync_root_id: row.get(1)?,
+                operation_type: row.get(2)?,
+                relative_path: row.get(3)?,
+                payload_json: row.get(4)?,
+                status: row.get(5)?,
+                recovery_path: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_operation_journal_status(
+        &self,
+        id: &str,
+        status: &str,
+        payload_json: Option<&str>,
+        recovery_path: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE operation_journal
+             SET status = ?1,
+                 payload_json = COALESCE(?2, payload_json),
+                 recovery_path = COALESCE(?3, recovery_path),
+                 updated_at = datetime('now')
+             WHERE id = ?4",
+            rusqlite::params![status, payload_json, recovery_path, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_operation_journal(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM operation_journal WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_app_setting_json(&self, key: &str, value_json: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_settings (key, value_json, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')",
+            rusqlite::params![key, value_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_app_setting_json(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value_json FROM app_settings WHERE key = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![key], |row| row.get(0))?;
+        Ok(rows.next().transpose()?)
     }
 
     // ── Activity log ──
@@ -377,6 +534,7 @@ pub struct SyncRootRow {
     pub last_full_sync: Option<String>,
     pub delete_prompt_pending: bool,
     pub last_poll_at: Option<String>,
+    pub service_state: String,
 }
 
 #[derive(Debug, Clone)]
@@ -411,7 +569,21 @@ pub struct PendingJobRow {
     pub payload_json: Option<String>,
     pub status: String,
     pub details: Option<String>,
+    pub recovery_path: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OperationJournalRow {
+    pub id: String,
+    pub sync_root_id: String,
+    pub operation_type: String,
+    pub relative_path: Option<String>,
+    pub payload_json: Option<String>,
+    pub status: String,
+    pub recovery_path: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone)]

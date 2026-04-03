@@ -19,6 +19,7 @@ use crate::api::auth::ApsAuthClient;
 use crate::api::data_management::ApsDataManagementClient;
 use crate::api::storage::ApsStorageClient;
 use crate::db::database::SyncDatabase;
+use crate::sync::parity::{prompt_payload_json, PromptKind, PromptPayload};
 
 fn normalize_rel(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
@@ -304,6 +305,42 @@ impl CloudProvider for ApsCloudProvider {
             Some(cloud_item_id),
             "success",
             None,
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn queue_delete_prompt(
+        &self,
+        relative_path: &Path,
+        cloud_id: &str,
+        is_directory: bool,
+    ) -> Result<()> {
+        let (db, root_id) = match (&self.state_db, &self.sync_root_id) {
+            (Some(db), Some(rid)) => (db, rid.as_str()),
+            _ => return Ok(()),
+        };
+        let rel = normalize_rel(relative_path);
+        let payload = PromptPayload {
+            kind: PromptKind::DeleteConfirm,
+            relative_path: rel.clone(),
+            cloud_item_id: Some(cloud_id.to_string()),
+            remote_head_version_id: None,
+            message: format!(
+                "Delete requested for {rel}. Choose whether to remove only the local copy or both local and cloud."
+            ),
+            is_directory,
+        };
+        let payload_json = prompt_payload_json(&payload)?;
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+        let pending_id = db.insert_pending_job(root_id, "prompt", Some(&payload_json), None)?;
+        db.update_pending_job(&pending_id, "action_required", None, None)?;
+        db.log_activity(
+            "delete_prompt",
+            Some(&rel),
+            Some(cloud_id),
+            "queued",
+            Some("delete confirmation required"),
             None,
         )?;
         Ok(())

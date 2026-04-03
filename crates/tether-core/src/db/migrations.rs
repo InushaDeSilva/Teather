@@ -87,6 +87,12 @@ fn migrate_sync_roots_v2(conn: &Connection) -> Result<()> {
         "last_poll_at",
         "last_poll_at TEXT",
     )?;
+    add_column_if_missing(
+        conn,
+        "sync_roots",
+        "service_state",
+        "service_state TEXT NOT NULL DEFAULT 'disabled'",
+    )?;
     Ok(())
 }
 
@@ -100,16 +106,42 @@ CREATE TABLE IF NOT EXISTS pending_jobs (
     payload_json TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     details TEXT,
+    recovery_path TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_pending_jobs_status ON pending_jobs(status);
+
+CREATE TABLE IF NOT EXISTS operation_journal (
+    id TEXT PRIMARY KEY,
+    sync_root_id TEXT NOT NULL REFERENCES sync_roots(id),
+    operation_type TEXT NOT NULL,
+    relative_path TEXT,
+    payload_json TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    recovery_path TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_operation_journal_status ON operation_journal(status);
 
 CREATE TABLE IF NOT EXISTS inventor_project_context (
     sync_root_id TEXT PRIMARY KEY REFERENCES sync_roots(id),
     ipj_path TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#,
+    )?;
+    add_column_if_missing(
+        conn,
+        "pending_jobs",
+        "recovery_path",
+        "recovery_path TEXT",
     )?;
     Ok(())
 }

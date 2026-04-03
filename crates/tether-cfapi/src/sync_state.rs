@@ -24,3 +24,22 @@ pub fn is_sync_pending(path: &Path) -> bool {
         Err(_) => path.is_file(),
     }
 }
+
+/// Returns true when the path is backed by a CFAPI placeholder, regardless of hydration.
+pub fn is_placeholder(path: &Path) -> bool {
+    Placeholder::open(path)
+        .ok()
+        .and_then(|ph| ph.info().ok().flatten())
+        .is_some()
+}
+
+/// Returns true when the path is a cloud-only placeholder and has no local payload yet.
+pub fn is_cloud_only_placeholder(path: &Path) -> bool {
+    match Placeholder::open(path) {
+        Ok(ph) => match ph.info() {
+            Ok(Some(pi)) => pi.on_disk_data_size() == 0,
+            _ => false,
+        },
+        Err(_) => false,
+    }
+}
