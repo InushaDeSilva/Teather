@@ -2,14 +2,15 @@
 
 use cloud_filter::error::CloudErrorKind;
 use cloud_filter::filter::{info, ticket, Request, SyncFilter};
-use cloud_filter::metadata::Metadata;
+use cloud_filter::metadata::{Metadata, MetadataExt};
 use cloud_filter::placeholder::Placeholder;
 use cloud_filter::placeholder_file::PlaceholderFile;
 use cloud_filter::utility::WriteAt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 
-use crate::provider::CloudProvider;
+use crate::provider::{CloudFileInfo, CloudProvider};
 
 fn is_old_versions_archive_path(path: &std::path::Path) -> bool {
     path.components().any(|component| {
@@ -33,6 +34,46 @@ impl TetherSyncFilter {
             provider,
         }
     }
+}
+
+fn parse_rfc3339_to_filetime(value: &str) -> Option<i64> {
+    const WINDOWS_EPOCH_OFFSET_SECS: i64 = 11_644_473_600;
+    const TICKS_PER_SEC: i128 = 10_000_000;
+
+    let dt = chrono::DateTime::parse_from_rfc3339(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let secs = dt.timestamp().checked_add(WINDOWS_EPOCH_OFFSET_SECS)?;
+    let ticks = i128::from(secs)
+        .checked_mul(TICKS_PER_SEC)?
+        .checked_add(i128::from(dt.timestamp_subsec_nanos() / 100))?;
+    i64::try_from(ticks).ok()
+}
+
+fn placeholder_metadata(item: &CloudFileInfo) -> Metadata {
+    let mut metadata = if item.is_directory {
+        Metadata::directory()
+    } else {
+        Metadata::file().size(item.size)
+    }
+    .attributes(FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0);
+
+    if let Some(created) = item
+        .created
+        .as_deref()
+        .and_then(parse_rfc3339_to_filetime)
+    {
+        metadata = metadata.creation_time(created).last_access_time(created);
+    }
+    if let Some(modified) = item
+        .last_modified
+        .as_deref()
+        .and_then(parse_rfc3339_to_filetime)
+    {
+        metadata = metadata.last_write_time(modified).change_time(modified);
+    }
+
+    metadata
 }
 
 impl SyncFilter for TetherSyncFilter {
@@ -89,11 +130,7 @@ impl SyncFilter for TetherSyncFilter {
         let mut placeholders: Vec<PlaceholderFile> = items
             .iter()
             .map(|item| {
-                let metadata = if item.is_directory {
-                    Metadata::directory()
-                } else {
-                    Metadata::file().size(item.size)
-                };
+                let metadata = placeholder_metadata(item);
 
                 // Store the cloud ID as the file identity blob (max 4KB).
                 // This lets us retrieve it in fetch_data without a DB lookup.

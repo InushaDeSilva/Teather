@@ -8,6 +8,7 @@ use cloud_filter::ext::FileExt;
 use cloud_filter::metadata::Metadata;
 use cloud_filter::placeholder::Placeholder;
 use cloud_filter::placeholder_file::PlaceholderFile;
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 
 /// Remove local file bytes while keeping the placeholder (same as Explorer *Free up space*).
 pub fn dehydrate_placeholder_file(path: &Path) -> anyhow::Result<()> {
@@ -29,7 +30,11 @@ pub fn create_placeholder_file(
     cloud_item_id: &str,
 ) -> anyhow::Result<()> {
     PlaceholderFile::new(file_name)
-        .metadata(Metadata::file().size(file_size))
+        .metadata(
+            Metadata::file()
+                .size(file_size)
+                .attributes(FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0),
+        )
         .blob(cloud_item_id.as_bytes().to_vec())
         .mark_in_sync()
         .create::<&Path>(parent_dir)

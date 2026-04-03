@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 cloud-filter = "0.0.6"
-windows = { version = "0.48", features = ["Win32_Foundation", "Win32_Storage_CloudFilters", "Win32_System_Com"] }
+windows = { version = "0.48", features = ["Win32_Foundation", "Win32_Storage_CloudFilters", "Win32_Storage_FileSystem", "Win32_System_Com"] }
 anyhow = "1.0"
 tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
