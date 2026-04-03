@@ -253,6 +253,43 @@ impl CloudProvider for ApsCloudProvider {
         Ok(())
     }
 
+    fn rename_file_mapping(
+        &self,
+        old_relative: &Path,
+        new_relative: &Path,
+        cloud_item_id: &str,
+    ) -> Result<()> {
+        let (db, root_id) = match (&self.state_db, &self.sync_root_id) {
+            (Some(db), Some(rid)) => (db, rid.as_str()),
+            _ => return Ok(()),
+        };
+        let old_rel = normalize_rel(old_relative);
+        let new_rel = normalize_rel(new_relative);
+        let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+
+        let mapped = db.get_file_entry_by_path(root_id, &old_rel)?;
+        let fallback = if mapped.is_none() {
+            db.get_file_entry_by_cloud_item(root_id, cloud_item_id)?
+        } else {
+            None
+        };
+
+        let candidate = mapped.or(fallback);
+        if let Some(row) = candidate {
+            if row.cloud_item_id.as_deref() == Some(cloud_item_id) {
+                db.move_file_entry(root_id, &row.local_relative_path, &new_rel)?;
+                tracing::info!(
+                    "Updated file mapping after rename: {} -> {} ({})",
+                    row.local_relative_path,
+                    new_rel,
+                    cloud_item_id
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn queue_upload_if_dirty(&self, local_full_path: PathBuf, cloud_item_id: &str) -> Result<()> {
         const DEBOUNCE: Duration = Duration::from_millis(400);
         let now = Instant::now();

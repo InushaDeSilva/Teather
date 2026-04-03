@@ -694,15 +694,37 @@ pub async fn shell_dispatch(
     verb: String,
     relative_path: String,
 ) -> Result<String, String> {
-    match verb.as_str() {
-        "sync_now" => sync_now(state, relative_path).await,
-        "get_latest_version" => get_latest_version(state, relative_path).await,
-        "delete_local" => delete_local_item(state, relative_path).await,
-        "delete_prompt" => request_delete_prompt(state, relative_path).await,
+    dispatch_shell_verb(state.inner(), &verb, &relative_path).await
+}
+
+pub async fn dispatch_shell_verb(
+    app_state: &AppState,
+    verb: &str,
+    relative_path: &str,
+) -> Result<String, String> {
+    let relative_path = relative_path.to_string();
+    match verb {
+        "sync_now" => sync_now_inner(app_state, relative_path).await,
+        "get_latest_version" => get_latest_version_inner(app_state, relative_path).await,
+        "delete_local" => delete_local_item_inner(app_state, relative_path).await,
+        "delete_prompt" | "delete_local_and_cloud" => {
+            request_delete_prompt_inner(app_state, relative_path).await
+        }
         "free_up_space" => {
-            free_up_space(state, relative_path).await?;
+            free_up_space_inner(app_state, relative_path).await?;
             Ok("Freed local space".into())
         }
+        "always_keep_on_device" => {
+            set_always_keep_on_device_inner(app_state, relative_path, true).await?;
+            Ok("Pinned for offline use".into())
+        }
+        "online_only" => {
+            set_always_keep_on_device_inner(app_state, relative_path.clone(), false).await?;
+            free_up_space_inner(app_state, relative_path).await?;
+            Ok("Set to online-only".into())
+        }
+        "view_online" => view_online_by_relative_path(app_state, relative_path).await,
+        "copy_link" => view_online_by_relative_path(app_state, relative_path).await,
         _ => Err(format!("Unknown shell verb: {verb}")),
     }
 }
@@ -791,7 +813,15 @@ async fn lookup_entry_for_relative_path(
     relative_path: &str,
 ) -> Result<(PathBuf, String, std::sync::Arc<tether_core::sync::queue::SyncQueue>, String), String>
 {
-    let engine = state.engine.lock().await;
+    lookup_entry_for_relative_path_inner(state.inner(), relative_path).await
+}
+
+async fn lookup_entry_for_relative_path_inner(
+    app_state: &AppState,
+    relative_path: &str,
+) -> Result<(PathBuf, String, std::sync::Arc<tether_core::sync::queue::SyncQueue>, String), String>
+{
+    let engine = app_state.engine.lock().await;
     let root = engine
         .sync_root_path
         .clone()
@@ -811,6 +841,233 @@ async fn lookup_entry_for_relative_path(
         .cloud_item_id
         .ok_or_else(|| format!("No cloud item id for {rel}"))?;
     Ok((root, sr_id, queue, cloud_item_id))
+}
+
+async fn sync_now_inner(app_state: &AppState, relative_path: String) -> Result<String, String> {
+    let (root, sr_id, queue, jobs) = {
+        let engine = app_state.engine.lock().await;
+        let root = engine
+            .sync_root_path
+            .clone()
+            .ok_or_else(|| "No sync root".to_string())?;
+        let sr_id = engine
+            .sync_root_db_id
+            .clone()
+            .ok_or_else(|| "No sync root id".to_string())?;
+        let queue = engine.queue.clone();
+        let host_full = root.join(&relative_path);
+        let data = tokio::fs::read(&host_full).await.map_err(|e| e.to_string())?;
+        let refs = reference::parse_inventor_references(&data);
+        let rel_path = Path::new(&relative_path);
+        let mut paths = vec![host_full];
+        paths.extend(reference::prefetch_closure_paths(rel_path, &root, &refs));
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        let mut jobs = Vec::new();
+        for p in paths {
+            let rel = p
+                .strip_prefix(&root)
+                .map(|x| x.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if let Ok(Some(entry)) = db.get_file_entry_by_path(&sr_id, &rel) {
+                if let Some(cid) = entry.cloud_item_id {
+                    jobs.push((p, cid));
+                }
+            }
+        }
+        (root, sr_id, queue, jobs)
+    };
+
+    let mut n = 0usize;
+    for (local_path, cid) in jobs {
+        let mut task = SyncTask::new(
+            SyncOperation::Download,
+            SyncPriority::Critical,
+            local_path,
+        );
+        task.cloud_item_id = Some(cid);
+        task.sync_root_id = Some(sr_id.clone());
+        task.sync_root_path = Some(root.clone());
+        queue.push(task).await;
+        n += 1;
+    }
+    Ok(format!("Queued {n} download task(s) for reference closure"))
+}
+
+async fn get_latest_version_inner(
+    app_state: &AppState,
+    relative_path: String,
+) -> Result<String, String> {
+    let (root, sr_id, queue, cloud_item_id) =
+        lookup_entry_for_relative_path_inner(app_state, &relative_path).await?;
+    let mut task = SyncTask::new(
+        SyncOperation::GetLatestVersion,
+        SyncPriority::High,
+        root.join(relative_path.replace('/', "\\")),
+    );
+    task.cloud_item_id = Some(cloud_item_id);
+    task.sync_root_id = Some(sr_id);
+    task.sync_root_path = Some(root);
+    queue.push(task).await;
+    Ok("Queued Get Latest Version".into())
+}
+
+async fn set_always_keep_on_device_inner(
+    app_state: &AppState,
+    relative_path: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let engine = app_state.engine.lock().await;
+    let sr = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let rel = relative_path.replace('\\', "/");
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.set_pin_state(sr, &rel, pinned)
+        .map_err(|e| e.to_string())
+}
+
+async fn free_up_space_inner(app_state: &AppState, relative_path: String) -> Result<(), String> {
+    let engine = app_state.engine.lock().await;
+    let root = engine
+        .sync_root_path
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let sr = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let rel = relative_path.replace('\\', "/");
+    {
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        if let Ok(Some(entry)) = db.get_file_entry_by_path(sr, &rel) {
+            if entry.pin_state != 0 {
+                return Err("Item is pinned (Always keep on this device); cannot free space.".into());
+            }
+        }
+    }
+    let full = root.join(&relative_path);
+    tether_cfapi::dehydrate_placeholder_file(&full).map_err(|e| e.to_string())?;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.update_hydration_state(sr, &rel, "online_only", true, None)
+        .map_err(|e| e.to_string())
+}
+
+async fn delete_local_item_inner(
+    app_state: &AppState,
+    relative_path: String,
+) -> Result<String, String> {
+    let (root, sync_root_id, rel, is_cloud_backed) = {
+        let engine = app_state.engine.lock().await;
+        let root = engine
+            .sync_root_path
+            .clone()
+            .ok_or_else(|| "No active sync".to_string())?;
+        let sync_root_id = engine
+            .sync_root_db_id
+            .clone()
+            .ok_or_else(|| "No active sync".to_string())?;
+        let rel = relative_path.replace('\\', "/");
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        let entry = db
+            .get_file_entry_by_path(&sync_root_id, &rel)
+            .map_err(|e| e.to_string())?;
+        let is_cloud_backed = entry.as_ref().and_then(|e| e.cloud_item_id.as_ref()).is_some();
+        (root, sync_root_id, rel, is_cloud_backed)
+    };
+
+    let full = root.join(relative_path.replace('/', "\\"));
+    if is_cloud_backed {
+        if full.exists() {
+            tether_cfapi::dehydrate_placeholder_file(&full).map_err(|e| e.to_string())?;
+        }
+        let engine = app_state.engine.lock().await;
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        db.update_hydration_state(&sync_root_id, &rel, "online_only", true, Some("delete_local"))
+            .map_err(|e| e.to_string())?;
+        return Ok("Local cache removed; cloud item kept.".into());
+    }
+
+    let recovery = recovery_path_for(&full);
+    if let Some(parent) = recovery.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if full.exists() {
+        std::fs::rename(&full, &recovery).map_err(|e| e.to_string())?;
+    }
+    let engine = app_state.engine.lock().await;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    db.remove_file_entry(&sync_root_id, &rel)
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Moved local-only file to recovery: {}", recovery.display()))
+}
+
+async fn request_delete_prompt_inner(
+    app_state: &AppState,
+    relative_path: String,
+) -> Result<String, String> {
+    let (sync_root_id, payload_json) = {
+        let engine = app_state.engine.lock().await;
+        let sync_root_id = engine
+            .sync_root_db_id
+            .clone()
+            .ok_or_else(|| "No active sync".to_string())?;
+        let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+        let rel = relative_path.replace('\\', "/");
+        let entry = db
+            .get_file_entry_by_path(&sync_root_id, &rel)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Item not found".to_string())?;
+        let payload = PromptPayload {
+            kind: PromptKind::DeleteConfirm,
+            relative_path: rel.clone(),
+            cloud_item_id: entry.cloud_item_id.clone(),
+            remote_head_version_id: None,
+            message: format!(
+                "Delete requested for {rel}. Choose whether to remove only the local copy or both local and cloud."
+            ),
+            is_directory: entry.is_directory,
+        };
+        (sync_root_id, prompt_payload_json(&payload).map_err(|e| e.to_string())?)
+    };
+
+    let engine = app_state.engine.lock().await;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    let id = db
+        .insert_pending_job(&sync_root_id, "prompt", Some(&payload_json), None)
+        .map_err(|e| e.to_string())?;
+    db.update_pending_job(&id, "action_required", None, None)
+        .map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+async fn view_online_by_relative_path(
+    app_state: &AppState,
+    relative_path: String,
+) -> Result<String, String> {
+    let engine = app_state.engine.lock().await;
+    let project_id = engine
+        .current_project_id
+        .as_ref()
+        .ok_or_else(|| "No active project".to_string())?;
+    let folder_id = engine
+        .current_root_folder_id
+        .as_ref()
+        .ok_or_else(|| "No active folder".to_string())?;
+    let sync_root_id = engine
+        .sync_root_db_id
+        .as_ref()
+        .ok_or_else(|| "No active sync".to_string())?;
+    let db = engine.db.lock().map_err(|e| format!("{e:?}"))?;
+    let rel = relative_path.replace('\\', "/");
+    let entry = db
+        .get_file_entry_by_path(sync_root_id, &rel)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Item not found for {rel}"))?;
+    let item_id = entry
+        .cloud_item_id
+        .ok_or_else(|| format!("No cloud item id for {rel}"))?;
+    Ok(urls::acc_view_item_url(project_id, folder_id, &item_id))
 }
 
 async fn resolve_delete_prompt(

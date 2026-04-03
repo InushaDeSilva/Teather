@@ -285,6 +285,21 @@ impl SyncDatabase {
         Ok(())
     }
 
+    pub fn move_file_entry(
+        &self,
+        sync_root_id: &str,
+        old_relative_path: &str,
+        new_relative_path: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE file_entries
+             SET local_relative_path = ?1
+             WHERE sync_root_id = ?2 AND local_relative_path = ?3",
+            rusqlite::params![new_relative_path, sync_root_id, old_relative_path],
+        )?;
+        Ok(())
+    }
+
     // ── Inventor IPJ ──
 
     pub fn set_inventor_ipj(&self, sync_root_id: &str, ipj_path: Option<&str>) -> Result<()> {

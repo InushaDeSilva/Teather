@@ -353,6 +353,12 @@ impl SyncFilter for TetherSyncFilter {
                     tracing::error!("rename_cloud_item: {}", e);
                     CloudErrorKind::NetworkUnavailable
                 })?;
+            self.provider
+                .rename_file_mapping(&relative_old, &relative_new, cloud_id)
+                .map_err(|e| {
+                    tracing::error!("rename_file_mapping: {}", e);
+                    CloudErrorKind::NetworkUnavailable
+                })?;
         }
 
         ticket.pass().map_err(|e| {
@@ -371,21 +377,44 @@ impl SyncFilter for TetherSyncFilter {
             return;
         }
 
-        // ── Resolve cloud item ID: blob first, DB fallback ──
-        let blob = request.file_blob();
-        let mut cloud_id = std::str::from_utf8(blob).unwrap_or("").trim().to_string();
+        // Prefer the current relative-path mapping from the DB. Placeholder blobs can be stale
+        // after save-as/copy/versioned-save flows, and trusting them can upload a new local file
+        // into the wrong cloud lineage.
+        let relative = path
+            .strip_prefix(&self.root_path)
+            .unwrap_or(path.as_path());
 
-        if cloud_id.is_empty() {
-            let relative = path
-                .strip_prefix(&self.root_path)
-                .unwrap_or(path.as_path());
-            cloud_id = self
-                .provider
-                .resolve_cloud_item_id_by_path(relative)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-        }
+        let blob = request.file_blob();
+        let blob_cloud_id = std::str::from_utf8(blob).unwrap_or("").trim().to_string();
+        let mapped_cloud_id = self
+            .provider
+            .resolve_cloud_item_id_by_path(relative)
+            .ok()
+            .flatten();
+
+        let cloud_id = match (mapped_cloud_id, blob_cloud_id.is_empty()) {
+            (Some(mapped), true) => mapped,
+            (Some(mapped), false) if mapped == blob_cloud_id => mapped,
+            (Some(mapped), false) => {
+                tracing::warn!(
+                    "closed: ignoring stale placeholder blob for {} (blob={}, mapped={})",
+                    path.display(),
+                    blob_cloud_id,
+                    mapped
+                );
+                mapped
+            }
+            (None, false) => {
+                tracing::info!(
+                    "closed: skipping upload for {} because no DB mapping exists for current path; treating it as a local create/copy",
+                    path.display()
+                );
+                return;
+            }
+            (None, true) => {
+                return;
+            }
+        };
 
         if cloud_id.is_empty() {
             return;

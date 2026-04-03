@@ -13,6 +13,50 @@ use tether_core::sync::engine::SyncEngine;
 
 use state::AppState;
 
+fn parse_shell_args(args: &[String]) -> Option<(String, String)> {
+    let mut verb = None;
+    let mut relative_path = None;
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--shell-verb" => {
+                if let Some(value) = args.get(idx + 1) {
+                    verb = Some(value.clone());
+                    idx += 1;
+                }
+            }
+            "--shell-path" => {
+                if let Some(value) = args.get(idx + 1) {
+                    relative_path = Some(value.clone());
+                    idx += 1;
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    match (verb, relative_path) {
+        (Some(verb), Some(relative_path)) => Some((verb, relative_path)),
+        _ => None,
+    }
+}
+
+fn dispatch_shell_args(app_state: AppState, args: &[String]) {
+    if let Some((verb, relative_path)) = parse_shell_args(args) {
+        async_runtime::spawn(async move {
+            if let Err(err) = commands::dispatch_shell_verb(&app_state, &verb, &relative_path).await
+            {
+                tracing::warn!(
+                    "shell dispatch failed for verb={} path={}: {}",
+                    verb,
+                    relative_path,
+                    err
+                );
+            }
+        });
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -30,13 +74,23 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_positioner::init())
-        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let app_state = AppState {
+                engine: app.state::<AppState>().engine.clone(),
+            };
+            dispatch_shell_args(app_state, &args);
+        }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .manage(app_state)
         .setup(|app| {
+            let startup_args: Vec<String> = std::env::args().collect();
+            let shell_state = AppState {
+                engine: app.state::<AppState>().engine.clone(),
+            };
+            dispatch_shell_args(shell_state, &startup_args);
             tray::setup_tray(app)?;
             let handle = app.handle().clone();
             let engine = app.state::<AppState>().engine.clone();

@@ -58,7 +58,14 @@
             <desktop3:BannersHandler Clsid="20000000-0000-0000-0000-000000000001"/>
             <cloudfiles2:StorageProviderStatusUISourceFactory Clsid="b1d8ef74-822d-401a-a14a-25f45b1f70b7"/>
             <desktop3:CloudFilesContextMenus>
-              <desktop3:Verb Id="Command1" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="SyncNow" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="GetLatestVersion" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="DeleteLocal" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="DeleteLocalAndCloud" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="AlwaysKeepOnDevice" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="FreeUpSpace" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="ViewOnline" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
+              <desktop3:Verb Id="CopyLink" Clsid="165cd069-d9c8-42b4-8e37-b6971afa4494" />
             </desktop3:CloudFilesContextMenus>
             <desktop4:ContentUriSource Clsid="97961bcb-601c-4950-927c-43b9319c7217"/>
           </desktop3:CloudFiles>

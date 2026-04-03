@@ -66,6 +66,16 @@ pub trait CloudProvider: Send + Sync {
         new_relative: &Path,
     ) -> anyhow::Result<()>;
 
+    /// Update local relative path bookkeeping after Explorer renames a file.
+    fn rename_file_mapping(
+        &self,
+        _old_relative: &Path,
+        _new_relative: &Path,
+        _cloud_item_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// After a placeholder is fully hydrated in [`crate::filter::TetherSyncFilter::fetch_data`].
     fn on_hydration_complete(
         &self,
