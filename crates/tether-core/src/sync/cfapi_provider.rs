@@ -14,11 +14,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use anyhow::{Context, Result};
 use tether_cfapi::{CloudFileInfo, CloudProvider};
 use tokio::runtime::Handle;
+use uuid::Uuid;
 
 use crate::api::auth::ApsAuthClient;
 use crate::api::data_management::ApsDataManagementClient;
 use crate::api::storage::ApsStorageClient;
-use crate::db::database::SyncDatabase;
+use crate::db::database::{FileEntryRow, SyncDatabase};
 use crate::sync::parity::{prompt_payload_json, PromptKind, PromptPayload};
 
 fn normalize_rel(p: &Path) -> String {
@@ -86,6 +87,20 @@ impl CloudProvider for ApsCloudProvider {
         )?;
 
         let mut out = Vec::with_capacity(items.len());
+        let mut persisted_rows: Vec<FileEntryRow> = Vec::new();
+        let rel_prefix = self
+            .folder_map
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(rel, id)| {
+                if id == cloud_folder_id {
+                    Some(rel.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
         for item in items {
             let is_directory = item.item_type == "folders";
             let mut size = if is_directory {
@@ -104,13 +119,53 @@ impl CloudProvider for ApsCloudProvider {
                 }
             }
             out.push(CloudFileInfo {
-                name: item.attributes.display_name,
+                name: item.attributes.display_name.clone(),
                 is_directory,
                 size,
-                cloud_id: item.id,
-                last_modified: item.attributes.last_modified_time,
-                created: item.attributes.create_time,
+                cloud_id: item.id.clone(),
+                last_modified: item.attributes.last_modified_time.clone(),
+                created: item.attributes.create_time.clone(),
             });
+
+            if let (Some(db), Some(sync_root_id)) = (&self.state_db, &self.sync_root_id) {
+                let rel_path = if rel_prefix.as_os_str().is_empty() {
+                    PathBuf::from(&item.attributes.display_name)
+                } else {
+                    rel_prefix.join(&item.attributes.display_name)
+                };
+                let rel = normalize_rel(&rel_path);
+                let mut row = {
+                    let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+                    db.get_file_entry_by_path(sync_root_id, &rel)?
+                        .or_else(|| db.get_file_entry_by_cloud_item(sync_root_id, &item.id).ok().flatten())
+                        .unwrap_or_else(|| {
+                            let mut r = FileEntryRow::default();
+                            r.id = Uuid::new_v4().to_string();
+                            r
+                        })
+                };
+                row.sync_root_id = sync_root_id.clone();
+                row.local_relative_path = rel;
+                row.cloud_item_id = Some(item.id.clone());
+                row.file_size = Some(size as i64);
+                row.last_cloud_modified = item.attributes.last_modified_time.clone();
+                row.sync_state = "in_sync".into();
+                row.is_placeholder = true;
+                row.is_directory = is_directory;
+                row.hydration_state = if is_directory {
+                    "directory".into()
+                } else {
+                    "online_only".into()
+                };
+                persisted_rows.push(row);
+            }
+        }
+
+        if let (Some(db), Some(_)) = (&self.state_db, &self.sync_root_id) {
+            let db = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+            for row in &persisted_rows {
+                db.upsert_file_entry(row)?;
+            }
         }
         Ok(out)
     }

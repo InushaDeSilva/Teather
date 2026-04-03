@@ -188,13 +188,12 @@ impl SyncEngine {
 
         let sync_root_db_id = {
             let db = self.db.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-            db.insert_sync_root(
-                hub_id,
-                project_id,
-                &root_folder_id,
-                sync_root.to_str().unwrap_or("."),
-                project_name,
-            )?
+            let local_path = sync_root.to_str().unwrap_or(".");
+            if let Some(existing) = db.find_sync_root(hub_id, project_id, &root_folder_id, local_path)? {
+                existing
+            } else {
+                db.insert_sync_root(hub_id, project_id, &root_folder_id, local_path, project_name)?
+            }
         };
         self.sync_root_db_id = Some(sync_root_db_id.clone());
         self.current_hub_id = Some(hub_id.to_string());

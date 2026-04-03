@@ -16,6 +16,16 @@ pub struct TetherSyncFilter {
     pub provider: Arc<dyn CloudProvider>,
 }
 
+fn is_old_versions_archive_path(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|s| s.eq_ignore_ascii_case("OldVersions"))
+            .unwrap_or(false)
+    })
+}
+
 impl TetherSyncFilter {
     pub fn new(root_path: PathBuf, provider: Arc<dyn CloudProvider>) -> Self {
         Self {
@@ -275,32 +285,12 @@ impl SyncFilter for TetherSyncFilter {
             });
         }
 
-        let blob = request.file_blob();
-        let cloud_id = std::str::from_utf8(blob).unwrap_or("").trim();
-        if cloud_id.is_empty() {
-            tracing::error!("delete: empty file identity blob");
-            return Err(CloudErrorKind::InvalidRequest);
-        }
-
         let path = request.path();
-        let relative = path
-            .strip_prefix(&self.root_path)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| PathBuf::new());
-        if let Err(e) = self
-            .provider
-            .queue_delete_prompt(&relative, cloud_id, info.is_directory())
-        {
-            tracing::error!("queue_delete_prompt failed: {e:#}");
-            return Err(CloudErrorKind::NetworkUnavailable);
-        }
-
-        tracing::info!(
-            "delete blocked pending prompt for {}",
-            path.display()
-        );
-        let _ = ticket;
-        Err(CloudErrorKind::NotSupported)
+        tracing::info!("delete: allowing local delete for {}", path.display());
+        ticket.pass().map_err(|e| {
+            tracing::error!("ticket.pass delete: {:?}", e);
+            CloudErrorKind::InvalidRequest
+        })
     }
 
     /// User renamed/moved a placeholder — propagate to cloud, then acknowledge.
@@ -332,6 +322,18 @@ impl SyncFilter for TetherSyncFilter {
             .strip_prefix(&self.root_path)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| PathBuf::new());
+
+        if !info.is_directory() && is_old_versions_archive_path(&relative_new) {
+            tracing::info!(
+                "rename: treating archive move as local-only {} -> {}",
+                relative_old.display(),
+                relative_new.display()
+            );
+            return ticket.pass().map_err(|e| {
+                tracing::error!("ticket.pass rename archive move: {:?}", e);
+                CloudErrorKind::InvalidRequest
+            });
+        }
 
         if info.is_directory() {
             self.provider

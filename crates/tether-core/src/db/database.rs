@@ -59,6 +59,31 @@ impl SyncDatabase {
         Ok(id)
     }
 
+    pub fn find_sync_root(
+        &self,
+        hub_id: &str,
+        project_id: &str,
+        folder_id: &str,
+        local_path: &str,
+    ) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id
+             FROM sync_roots
+             WHERE hub_id = ?1 AND project_id = ?2 AND folder_id = ?3 AND local_path = ?4
+             ORDER BY (
+                SELECT COUNT(*)
+                FROM file_entries
+                WHERE file_entries.sync_root_id = sync_roots.id
+             ) DESC, rowid DESC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(
+            rusqlite::params![hub_id, project_id, folder_id, local_path],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.next().transpose()?)
+    }
+
     pub fn get_sync_root(&self, id: &str) -> Result<Option<SyncRootRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, hub_id, project_id, folder_id, local_path, display_name, last_full_sync,
