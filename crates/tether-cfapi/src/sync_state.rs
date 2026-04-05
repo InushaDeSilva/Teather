@@ -88,40 +88,51 @@ fn get_file_attributes(path: &Path) -> u32 {
 
 /// Mark a populated file as in-sync (and convert it from a regular file to a placeholder if necessary).
 pub fn mark_placeholder_in_sync(path: &Path, cloud_item_id: &str) -> anyhow::Result<()> {
-    match Placeholder::open(path) {
-        Ok(mut ph) => {
-            ph.mark_in_sync(true, None)
-                .map_err(|e| anyhow::anyhow!("CfSetInSyncState: {e:?}"))?;
-            Ok(())
-        }
-        Err(err) => {
-            // If it's not a cloud file, we can convert it into a hydrated placeholder
-            // using CfConvertToPlaceholder so the sync engine tracks it and it gets
-            // the green check badge.
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .map_err(|e| anyhow::anyhow!("open for convert: {e}"))?;
-            
-            use std::os::windows::io::AsRawHandle;
-            let handle = windows::Win32::Foundation::HANDLE(f.as_raw_handle() as isize);
-            let blob = cloud_item_id.as_bytes();
-            
-            unsafe {
-                windows::Win32::Storage::CloudFilters::CfConvertToPlaceholder(
-                    handle,
-                    Some(blob.as_ptr() as *const std::ffi::c_void),
-                    blob.len() as u32,
-                    windows::Win32::Storage::CloudFilters::CF_CONVERT_FLAG_MARK_IN_SYNC,
-                    None,
-                    None,
-                )
-                .map_err(|e| anyhow::anyhow!("CfConvertToPlaceholder: {e}"))?;
+    let mut is_cloud_file_error = false;
+    
+    if let Ok(mut ph) = Placeholder::open(path) {
+        if let Err(e) = ph.mark_in_sync(true, None) {
+            let err_str = format!("{:?}", e);
+            if err_str.contains("0x80070178") || err_str.contains("not a cloud file") {
+                is_cloud_file_error = true;
+            } else {
+                return Err(anyhow::anyhow!("CfSetInSyncState: {e:?}"));
             }
-            Ok(())
+        } else {
+            return Ok(());
+        }
+    } else {
+        is_cloud_file_error = true;
+    }
+
+    if is_cloud_file_error {
+        // If it's not a cloud file, we can convert it into a hydrated placeholder
+        // using CfConvertToPlaceholder so the sync engine tracks it and it gets
+        // the green check badge.
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| anyhow::anyhow!("open for convert: {e}"))?;
+        
+        use std::os::windows::io::AsRawHandle;
+        let handle = windows::Win32::Foundation::HANDLE(f.as_raw_handle() as isize);
+        let blob = cloud_item_id.as_bytes();
+        
+        unsafe {
+            windows::Win32::Storage::CloudFilters::CfConvertToPlaceholder(
+                handle,
+                Some(blob.as_ptr() as *const std::ffi::c_void),
+                blob.len() as u32,
+                windows::Win32::Storage::CloudFilters::CF_CONVERT_FLAG_MARK_IN_SYNC,
+                None,
+                None,
+            )
+            .map_err(|e| anyhow::anyhow!("CfConvertToPlaceholder: {e}"))?;
         }
     }
+    
+    Ok(())
 }
 
 /// Returns `true` if the file has local bytes and is NOT in sync (i.e. Explorer shows
