@@ -55,7 +55,8 @@ fn resolve_sync_path(sync_root: &Path, rel: &str) -> PathBuf {
 }
 
 fn local_file_already_present(sync_root: &Path, rel_path: &str) -> bool {
-    resolve_sync_path(sync_root, rel_path).exists()
+    // Use GetFileAttributesW — never opens a handle, never triggers hydration.
+    tether_cfapi::path_exists_no_recall(&resolve_sync_path(sync_root, rel_path))
 }
 
 /// Poll cloud folders for changes at a regular interval (recursive).
@@ -121,6 +122,13 @@ async fn poll_once(
 
     let mut seen_cloud_item_ids: HashSet<String> = HashSet::new();
 
+    // Build a set of known relative paths from the DB so we can avoid
+    // filesystem probes for files that already have a DB entry.
+    let known_rel_paths: HashSet<&str> = local_entries
+        .iter()
+        .map(|e| e.local_relative_path.as_str())
+        .collect();
+
     while let Some((folder_id, rel_prefix, depth)) = stack.pop_front() {
         if depth > MAX_FOLDER_DEPTH {
             warn!(
@@ -173,11 +181,13 @@ async fn poll_once(
                     }
                 }
                 None => {
-                    // Placeholders often exist on disk before `file_entries` is populated; do not
-                    // treat every recursive cloud item as a missing file (queue explosion).
-                    if local_file_already_present(sync_root_path, &rel_path) {
+                    // Check DB path set first (cheapest), then fall back to a
+                    // no-recall filesystem attribute check.
+                    if known_rel_paths.contains(rel_path.as_str())
+                        || local_file_already_present(sync_root_path, &rel_path)
+                    {
                         debug!(
-                            "Skipping Added for {:?}: already present on disk (no DB row yet)",
+                            "Skipping Added for {:?}: already present (DB or on disk)",
                             rel_path
                         );
                         continue;

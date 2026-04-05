@@ -58,7 +58,7 @@ pub fn start(
     let repair_root = sync_root;
     let save_patterns_for_repair = save_patterns;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
             let _ = reconcile_local_state(
@@ -188,10 +188,17 @@ async fn reconcile_event_paths(
                 continue;
             }
 
-            let local_modified = std::fs::metadata(&path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(system_time_to_rfc3339);
+            // Only probe filesystem metadata for files that are NOT online-only.
+            // For online-only entries the DB mtime is authoritative — reading
+            // std::fs::metadata() would trigger hydration via CreateFileW.
+            let local_modified = if row.hydration_state == "online_only" {
+                row.last_local_modified.clone()
+            } else {
+                std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(system_time_to_rfc3339)
+            };
             let changed_since_last =
                 local_modified.as_deref() != row.last_local_modified.as_deref();
             if prioritized_live_paths.contains(&rel) || changed_since_last || sync_pending {
@@ -217,14 +224,16 @@ async fn reconcile_event_paths(
             continue;
         }
 
-        if tether_cfapi::is_cloud_only_placeholder(&path) {
+        // Use attribute-based check — no handle open, no hydration.
+        if tether_cfapi::is_cloud_only_attr(&path) {
             tracing::debug!(
                 "Ignoring watcher event for cloud-only placeholder {}",
                 rel
             );
             continue;
         }
-        if path.is_dir() {
+        // Use no-recall dir check — avoids opening a handle.
+        if tether_cfapi::is_dir_no_recall(&path) {
             if rel.is_empty() {
                 continue;
             }
@@ -242,7 +251,8 @@ async fn reconcile_event_paths(
             .await?;
             continue;
         }
-        if !path.is_file() {
+        // Use no-recall file check — avoids opening a handle.
+        if !tether_cfapi::is_file_no_recall(&path) {
             continue;
         }
         if let Some((_, live_rel)) = deferred_archives.iter().find(|(archive_rel, _)| archive_rel == &rel) {
@@ -339,10 +349,7 @@ pub async fn reconcile_local_state(
 
     let online = matches!(service_state, ServiceState::Running | ServiceState::Reconnecting);
 
-    let mut local_files = Vec::new();
-    let mut local_dirs = Vec::new();
-    collect_paths(sync_root, sync_root, &mut local_dirs, &mut local_files)?;
-
+    // --- DB-first approach: load entries and skip online-only files ---
     let db_rows = {
         let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         guard.get_all_file_entries(sync_root_id)?
@@ -352,6 +359,13 @@ pub async fn reconcile_local_state(
         .into_iter()
         .map(|row| (row.local_relative_path.clone(), row))
         .collect();
+
+    // Only walk the filesystem for files that might need action.
+    // collect_paths now uses is_cloud_only_attr (GetFileAttributesW)
+    // instead of is_cloud_only_placeholder (CfOpenFileWithOplock).
+    let mut local_files = Vec::new();
+    let mut local_dirs = Vec::new();
+    collect_paths(sync_root, sync_root, &mut local_dirs, &mut local_files)?;
     let pending_keys = pending_journal_keys(db, sync_root_id)?;
     let deferred_archives = {
         let mut guard = save_patterns
@@ -407,8 +421,18 @@ pub async fn reconcile_local_state(
             continue;
         }
         let full = sync_root.join(file_rel.replace('/', "\\"));
-        if tether_cfapi::is_cloud_only_placeholder(&full) {
+        // Use attribute-based check — no handle open, no hydration.
+        if tether_cfapi::is_cloud_only_attr(&full) {
             continue;
+        }
+        // Skip online-only OldVersions entries proactively — these should
+        // only sync if locally created by Inventor's save flow.
+        if let Some(row) = known_by_rel.get(file_rel) {
+            if row.hydration_state == "online_only"
+                && is_old_versions_archive_path(Path::new(file_rel))
+            {
+                continue;
+            }
         }
         match known_by_rel.get(file_rel) {
             None => {
@@ -512,7 +536,7 @@ async fn queue_or_journal(
 
     let local_path = sync_root.join(relative_path.replace('/', "\\"));
     if matches!(operation, SyncOperation::Upload | SyncOperation::CreateRemoteFile)
-        && tether_cfapi::is_cloud_only_placeholder(&local_path)
+        && tether_cfapi::is_cloud_only_attr(&local_path)
     {
         tracing::debug!(
             "Skipping {} for cloud-only placeholder {}",
@@ -571,7 +595,8 @@ fn collect_paths(
             dirs.push(rel.clone());
             collect_paths(root, &path, dirs, files)?;
         } else if file_type.is_file() {
-            if tether_cfapi::is_cloud_only_placeholder(&path) {
+            // Use attribute-based check — no handle open, no hydration.
+            if tether_cfapi::is_cloud_only_attr(&path) {
                 continue;
             }
             files.push(rel);

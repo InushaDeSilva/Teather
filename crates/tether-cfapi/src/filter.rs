@@ -509,7 +509,7 @@ impl SyncFilter for TetherSyncFilter {
             return;
         }
         let path = request.path();
-        if path.is_dir() {
+        if crate::sync_state::is_dir_no_recall(&path) {
             return;
         }
 

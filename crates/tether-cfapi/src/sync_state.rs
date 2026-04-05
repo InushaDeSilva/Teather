@@ -1,8 +1,90 @@
 //! Windows CFAPI in-sync state helpers.
+//!
+//! Functions in this module come in two flavours:
+//!
+//! * **Handle-based** (`Placeholder::open` / `CfOpenFileWithOplock`) — safe for
+//!   querying full placeholder info (on_disk_data_size, in-sync state, blob).
+//!   `CfOpenFileWithOplock` does **not** trigger `fetch_data`.
+//!
+//! * **Attribute-based** (`GetFileAttributesW`) — the cheapest possible check.
+//!   Returns file attribute flags without ever opening a handle or touching
+//!   file data.  Use for read-only "is this cloud-only?" queries in hot loops
+//!   (reconcile, poller, watcher).
 
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 use cloud_filter::placeholder::Placeholder;
+
+// ── Attribute-based (no handle, no recall) ──────────────────────────────
+
+// Raw Win32 attribute bits (avoids newtype ambiguity across `windows` versions).
+const ATTR_DIRECTORY: u32 = 0x10;                // FILE_ATTRIBUTE_DIRECTORY
+const ATTR_OFFLINE: u32 = 0x1000;                // FILE_ATTRIBUTE_OFFLINE
+const ATTR_RECALL_ON_DATA_ACCESS: u32 = 0x00400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+const ATTR_RECALL_ON_OPEN: u32 = 0x00040000;     // FILE_ATTRIBUTE_RECALL_ON_OPEN
+const ATTR_INVALID: u32 = 0xFFFF_FFFF;           // INVALID_FILE_ATTRIBUTES
+
+/// Lightweight check: returns `true` when the path has the
+/// `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` or `FILE_ATTRIBUTE_OFFLINE` attribute,
+/// meaning the file data lives in the cloud and any standard `CreateFileW` /
+/// `ReadFile` call would trigger `fetch_data`.
+///
+/// This never opens a handle, never triggers hydration, and never blocks on
+/// network I/O.  Returns `false` for non-existent paths or non-placeholder
+/// files.
+pub fn is_cloud_only_attr(path: &Path) -> bool {
+    let attrs = get_file_attributes(path);
+    if attrs == ATTR_INVALID {
+        return false;
+    }
+    // RECALL_ON_DATA_ACCESS is the canonical bit for "dehydrated CFAPI
+    // placeholder".  OFFLINE is sometimes also set by the OS.
+    (attrs & ATTR_RECALL_ON_DATA_ACCESS != 0)
+        || (attrs & ATTR_OFFLINE != 0 && attrs & ATTR_RECALL_ON_OPEN != 0)
+}
+
+/// Returns `true` if the path exists on the filesystem (placeholder or
+/// regular file).  Unlike `path.exists()`, this never opens a handle and
+/// never triggers hydration.
+pub fn path_exists_no_recall(path: &Path) -> bool {
+    get_file_attributes(path) != ATTR_INVALID
+}
+
+/// Returns `true` if the path is a directory.  Unlike `path.is_dir()`,
+/// this never opens a handle and never triggers hydration.
+pub fn is_dir_no_recall(path: &Path) -> bool {
+    let attrs = get_file_attributes(path);
+    if attrs == ATTR_INVALID {
+        return false;
+    }
+    attrs & ATTR_DIRECTORY != 0
+}
+
+/// Returns `true` if the path is a file (not a directory).  Unlike
+/// `path.is_file()`, this never opens a handle and never triggers hydration.
+pub fn is_file_no_recall(path: &Path) -> bool {
+    let attrs = get_file_attributes(path);
+    if attrs == ATTR_INVALID {
+        return false;
+    }
+    attrs & ATTR_DIRECTORY == 0
+}
+
+/// Raw wrapper around `GetFileAttributesW`.  Returns `ATTR_INVALID`
+/// on failure (file not found, access denied, etc.).
+fn get_file_attributes(path: &Path) -> u32 {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // In windows 0.48 the return is u32 directly.
+    unsafe {
+        windows::Win32::Storage::FileSystem::GetFileAttributesW(
+            windows::core::PCWSTR(wide.as_ptr()),
+        )
+    }
+}
+
+
+// ── Handle-based (CfOpenFileWithOplock — does NOT trigger fetch_data) ────
 
 /// Mark a hydrated placeholder file as in sync with the cloud (Explorer badge clears).
 pub fn mark_placeholder_in_sync(path: &Path) -> anyhow::Result<()> {
@@ -14,14 +96,14 @@ pub fn mark_placeholder_in_sync(path: &Path) -> anyhow::Result<()> {
 
 /// Returns `true` if the file has local bytes and is NOT in sync (i.e. Explorer shows
 /// "Sync pending"). For non-placeholder files (worker-downloaded), returns `true` if
-/// the file exists on disk.
+/// the file exists on disk (checked via attributes, no recall).
 pub fn is_sync_pending(path: &Path) -> bool {
     match Placeholder::open(path) {
         Ok(ph) => match ph.info() {
             Ok(Some(pi)) => !pi.is_in_sync() && pi.on_disk_data_size() > 0,
             _ => false,
         },
-        Err(_) => path.is_file(),
+        Err(_) => is_file_no_recall(path),
     }
 }
 
@@ -34,6 +116,9 @@ pub fn is_placeholder(path: &Path) -> bool {
 }
 
 /// Returns true when the path is a cloud-only placeholder and has no local payload yet.
+///
+/// Prefer [`is_cloud_only_attr`] when you only need a yes/no answer in a hot
+/// loop — it avoids the `CfOpenFileWithOplock` overhead entirely.
 pub fn is_cloud_only_placeholder(path: &Path) -> bool {
     match Placeholder::open(path) {
         Ok(ph) => match ph.info() {
@@ -43,3 +128,4 @@ pub fn is_cloud_only_placeholder(path: &Path) -> bool {
         Err(_) => false,
     }
 }
+
