@@ -410,18 +410,18 @@ impl SyncFilter for TetherSyncFilter {
         info: info::Delete,
     ) -> Result<(), CloudErrorKind> {
         if info.is_undelete() {
-            return ticket.pass().map_err(|e| {
+            if let Err(e) = ticket.pass() {
                 tracing::error!("ticket.pass delete (undelete): {:?}", e);
-                CloudErrorKind::InvalidRequest
-            });
+            }
+            return Ok(());
         }
 
         let path = request.path();
         tracing::info!("delete: allowing local delete for {}", path.display());
-        ticket.pass().map_err(|e| {
+        if let Err(e) = ticket.pass() {
             tracing::error!("ticket.pass delete: {:?}", e);
-            CloudErrorKind::InvalidRequest
-        })
+        }
+        Ok(())
     }
 
     /// User renamed/moved a placeholder — propagate to cloud, then acknowledge.
@@ -457,10 +457,10 @@ impl SyncFilter for TetherSyncFilter {
                 target.display(),
                 source_path.display()
             );
-            return ticket.pass().map_err(|e| {
+            if let Err(e) = ticket.pass() {
                 tracing::error!("ticket.pass rename to outside sync root: {:?}", e);
-                CloudErrorKind::InvalidRequest
-            });
+            }
+            return Ok(());
         }
         
         let relative_new = target
@@ -477,10 +477,10 @@ impl SyncFilter for TetherSyncFilter {
                 relative_old.display(),
                 relative_new.display()
             );
-            return ticket.pass().map_err(|e| {
+            if let Err(e) = ticket.pass() {
                 tracing::error!("ticket.pass rename archive move: {:?}", e);
-                CloudErrorKind::InvalidRequest
-            });
+            }
+            return Ok(());
         }
 
         if info.is_directory() {
@@ -511,10 +511,10 @@ impl SyncFilter for TetherSyncFilter {
                 })?;
         }
 
-        ticket.pass().map_err(|e| {
+        if let Err(e) = ticket.pass() {
             tracing::error!("ticket.pass rename: {:?}", e);
-            CloudErrorKind::InvalidRequest
-        })
+        }
+        Ok(())
     }
 
     /// Last handle closed — if sync is pending, upload.

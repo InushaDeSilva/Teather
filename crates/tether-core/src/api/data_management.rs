@@ -449,9 +449,6 @@ impl ApsDataManagementClient {
         Ok(result.data)
     }
 
-    /// Mark a file as deleted in BIM 360 / ACC (POST Deleted version).
-    /// Tries extension-only first (works for many ACC projects); on `400 BAD_INPUT`, retries with
-    /// `name` set (APS blog / older Docs payloads).
     pub async fn delete_item_as_deleted_version(
         &self,
         token: &str,
@@ -461,40 +458,24 @@ impl ApsDataManagementClient {
     ) -> Result<VersionInfo> {
         let url = format!("{BASE_URL}/data/v1/projects/{project_id}/versions");
 
-        let body_minimal = serde_json::json!({
-            "jsonapi": { "version": "1.0" },
-            "data": {
-                "type": "versions",
-                "attributes": {
-                    "extension": {
-                        "type": "versions:autodesk.core:Deleted",
-                        "version": "1.0"
-                    }
-                },
-                "relationships": {
-                    "item": {
-                        "data": { "type": "items", "id": item_id }
-                    }
-                }
-            }
-        });
+        let extension_types = [
+            "versions:autodesk.core:Deleted",
+            "versions:autodesk.bim360:Deleted",
+            "versions:autodesk.a360:Deleted",
+        ];
 
-        let (status, text) = self
-            .post_versions_jsonapi(token, &url, &body_minimal)
-            .await?;
-        let (status, text) = if status == StatusCode::BAD_REQUEST {
-            debug!(
-                "delete Deleted version: retrying with name attribute (first response: {})",
-                text.chars().take(200).collect::<String>()
-            );
-            let body_named = serde_json::json!({
+        let mut last_status = StatusCode::BAD_REQUEST;
+        let mut last_text = String::new();
+
+        for ext_type in extension_types {
+            // First try minimal payload
+            let body_minimal = serde_json::json!({
                 "jsonapi": { "version": "1.0" },
                 "data": {
                     "type": "versions",
                     "attributes": {
-                        "name": display_name,
                         "extension": {
-                            "type": "versions:autodesk.core:Deleted",
+                            "type": ext_type,
                             "version": "1.0"
                         }
                     },
@@ -505,18 +486,44 @@ impl ApsDataManagementClient {
                     }
                 }
             });
-            self.post_versions_jsonapi(token, &url, &body_named).await?
-        } else {
-            (status, text)
-        };
 
-        if !status.is_success() {
-            anyhow::bail!("Delete item (Deleted version) failed ({}): {}", status, text);
+            let (status, text) = self.post_versions_jsonapi(token, &url, &body_minimal).await?;
+            if status.is_success() {
+                let result: JsonApiResponse<VersionInfo> = serde_json::from_str(&text)?;
+                return Ok(result.data);
+            }
+
+            // Retry with the name attribute
+            let body_named = serde_json::json!({
+                "jsonapi": { "version": "1.0" },
+                "data": {
+                    "type": "versions",
+                    "attributes": {
+                        "name": display_name,
+                        "extension": {
+                            "type": ext_type,
+                            "version": "1.0"
+                        }
+                    },
+                    "relationships": {
+                        "item": {
+                            "data": { "type": "items", "id": item_id }
+                        }
+                    }
+                }
+            });
+
+            let (status, text) = self.post_versions_jsonapi(token, &url, &body_named).await?;
+            if status.is_success() {
+                let result: JsonApiResponse<VersionInfo> = serde_json::from_str(&text)?;
+                return Ok(result.data);
+            }
+
+            last_status = status;
+            last_text = text;
         }
 
-        let result: JsonApiResponse<VersionInfo> = serde_json::from_str(&text)
-            .context("parse delete-version response")?;
-        Ok(result.data)
+        anyhow::bail!("Delete item (Deleted version) failed ({}): {}", last_status, last_text);
     }
 
     async fn post_versions_jsonapi(

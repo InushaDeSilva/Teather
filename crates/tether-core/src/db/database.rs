@@ -130,53 +130,111 @@ impl SyncDatabase {
     // ── File entries ──
 
     pub fn upsert_file_entry(&self, entry: &FileEntryRow) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO file_entries
-                (id, sync_root_id, local_relative_path, cloud_item_id, cloud_version_id,
-                 cloud_storage_urn, local_hash, cloud_hash, file_size,
-                 last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory,
-                 hydration_state, pin_state, lock_state, base_remote_version_id, base_remote_modified, hydration_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-             ON CONFLICT(sync_root_id, local_relative_path) DO UPDATE SET
-                cloud_item_id = excluded.cloud_item_id,
-                cloud_version_id = excluded.cloud_version_id,
-                cloud_storage_urn = excluded.cloud_storage_urn,
-                local_hash = excluded.local_hash,
-                cloud_hash = excluded.cloud_hash,
-                file_size = excluded.file_size,
-                last_local_modified = excluded.last_local_modified,
-                last_cloud_modified = excluded.last_cloud_modified,
-                sync_state = excluded.sync_state,
-                is_placeholder = excluded.is_placeholder,
-                hydration_state = excluded.hydration_state,
-                pin_state = excluded.pin_state,
-                lock_state = excluded.lock_state,
-                base_remote_version_id = excluded.base_remote_version_id,
-                base_remote_modified = excluded.base_remote_modified,
-                hydration_reason = excluded.hydration_reason",
-            rusqlite::params![
-                entry.id,
-                entry.sync_root_id,
-                entry.local_relative_path,
-                entry.cloud_item_id,
-                entry.cloud_version_id,
-                entry.cloud_storage_urn,
-                entry.local_hash,
-                entry.cloud_hash,
-                entry.file_size,
-                entry.last_local_modified,
-                entry.last_cloud_modified,
-                entry.sync_state,
-                entry.is_placeholder,
-                entry.is_directory,
-                entry.hydration_state,
-                entry.pin_state,
-                entry.lock_state,
-                entry.base_remote_version_id,
-                entry.base_remote_modified,
-                entry.hydration_reason,
-            ],
-        )?;
+        let exists: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM file_entries WHERE id = ?1",
+                rusqlite::params![entry.id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+
+        if exists {
+            self.conn.execute(
+                "UPDATE file_entries SET
+                    sync_root_id = ?2,
+                    local_relative_path = ?3,
+                    cloud_item_id = ?4,
+                    cloud_version_id = ?5,
+                    cloud_storage_urn = ?6,
+                    local_hash = ?7,
+                    cloud_hash = ?8,
+                    file_size = ?9,
+                    last_local_modified = ?10,
+                    last_cloud_modified = ?11,
+                    sync_state = ?12,
+                    is_placeholder = ?13,
+                    is_directory = ?14,
+                    hydration_state = ?15,
+                    pin_state = ?16,
+                    lock_state = ?17,
+                    base_remote_version_id = ?18,
+                    base_remote_modified = ?19,
+                    hydration_reason = ?20
+                 WHERE id = ?1",
+                rusqlite::params![
+                    entry.id,
+                    entry.sync_root_id,
+                    entry.local_relative_path,
+                    entry.cloud_item_id,
+                    entry.cloud_version_id,
+                    entry.cloud_storage_urn,
+                    entry.local_hash,
+                    entry.cloud_hash,
+                    entry.file_size,
+                    entry.last_local_modified,
+                    entry.last_cloud_modified,
+                    entry.sync_state,
+                    entry.is_placeholder,
+                    entry.is_directory,
+                    entry.hydration_state,
+                    entry.pin_state,
+                    entry.lock_state,
+                    entry.base_remote_version_id,
+                    entry.base_remote_modified,
+                    entry.hydration_reason,
+                ],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO file_entries
+                    (id, sync_root_id, local_relative_path, cloud_item_id, cloud_version_id,
+                     cloud_storage_urn, local_hash, cloud_hash, file_size,
+                     last_local_modified, last_cloud_modified, sync_state, is_placeholder, is_directory,
+                     hydration_state, pin_state, lock_state, base_remote_version_id, base_remote_modified, hydration_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                 ON CONFLICT(sync_root_id, local_relative_path) DO UPDATE SET
+                    id = excluded.id, /* adopting the new ID if we overlap */
+                    cloud_item_id = excluded.cloud_item_id,
+                    cloud_version_id = excluded.cloud_version_id,
+                    cloud_storage_urn = excluded.cloud_storage_urn,
+                    local_hash = excluded.local_hash,
+                    cloud_hash = excluded.cloud_hash,
+                    file_size = excluded.file_size,
+                    last_local_modified = excluded.last_local_modified,
+                    last_cloud_modified = excluded.last_cloud_modified,
+                    sync_state = excluded.sync_state,
+                    is_placeholder = excluded.is_placeholder,
+                    hydration_state = excluded.hydration_state,
+                    pin_state = excluded.pin_state,
+                    lock_state = excluded.lock_state,
+                    base_remote_version_id = excluded.base_remote_version_id,
+                    base_remote_modified = excluded.base_remote_modified,
+                    hydration_reason = excluded.hydration_reason",
+                rusqlite::params![
+                    entry.id,
+                    entry.sync_root_id,
+                    entry.local_relative_path,
+                    entry.cloud_item_id,
+                    entry.cloud_version_id,
+                    entry.cloud_storage_urn,
+                    entry.local_hash,
+                    entry.cloud_hash,
+                    entry.file_size,
+                    entry.last_local_modified,
+                    entry.last_cloud_modified,
+                    entry.sync_state,
+                    entry.is_placeholder,
+                    entry.is_directory,
+                    entry.hydration_state,
+                    entry.pin_state,
+                    entry.lock_state,
+                    entry.base_remote_version_id,
+                    entry.base_remote_modified,
+                    entry.hydration_reason,
+                ],
+            )?;
+        }
         Ok(())
     }
 
