@@ -46,6 +46,9 @@
 - [x] Hydration callback → DB state (`on_hydration_complete`)
 - [x] Dehydrate helper (`tether_cfapi::dehydrate_placeholder_file`) for Free up space
 - [x] MSIX packaging assets (`packaging/`, appx manifests)
+- [x] **Stabilization**: Handled `STATUS_STACK_BUFFER_OVERRUN` / User Cancelled panics in CFAPI gracefully
+- [x] **Stabilization**: Resolved `UNIQUE constraint failed` SQLite crashes during dense folder fetch (`upsert_file_entry` fix)
+- [x] **Stabilization**: Addressed auto-download issues and non-CAD placeholder conversion (`mark_placeholder_in_sync`)
 
 ## Desktop Connector parity backlog (P0–P4)
 
