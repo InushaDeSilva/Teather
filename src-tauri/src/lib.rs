@@ -93,15 +93,44 @@ pub fn run() {
             dispatch_shell_args(shell_state, &startup_args);
             tray::setup_tray(app)?;
             let handle = app.handle().clone();
+            
+            if let Some(window) = app.get_webview_window("main") {
+                let w = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(false) = event {
+                        let _ = w.hide();
+                    }
+                });
+            }
+
             let engine = app.state::<AppState>().engine.clone();
             async_runtime::spawn(async move {
+                use tauri_plugin_notification::NotificationExt;
+                let mut notified_prompts = std::collections::HashSet::new();
                 let mut tick = tokio::time::interval(Duration::from_secs(3));
                 loop {
                     tick.tick().await;
-                    let n = {
+                    
+                    let (n, prompts) = {
                         let eng = engine.lock().await;
-                        eng.queue.len().await
+                        let queued = eng.queue.len().await;
+                        let prompts = eng.db.lock()
+                            .ok()
+                            .and_then(|db| db.list_pending_jobs("action_required", 10).ok())
+                            .unwrap_or_default();
+                        (queued, prompts)
                     };
+
+                    for p in prompts {
+                        if notified_prompts.insert(p.id.clone()) {
+                            let _ = handle.notification()
+                                .builder()
+                                .title("Tether - Action Required")
+                                .body("A file sync needs your attention. Click here or open Tether.")
+                                .show();
+                        }
+                    }
+
                     let tip = if n == 0 {
                         "Tether — idle".to_string()
                     } else {
@@ -122,13 +151,14 @@ pub fn run() {
             commands::get_projects,
             commands::get_folders,
             commands::get_drive_view,
+            commands::auto_discover_drive_folders,
             commands::get_subfolders,
             commands::resolve_drive_folder,
             commands::pause_sync,
             commands::resume_sync,
             commands::set_service_state,
             commands::open_sync_folder,
-            commands::start_sync,
+            commands::start_unified_sync,
             commands::get_sync_session,
             commands::get_view_online_url,
             commands::get_copy_link,

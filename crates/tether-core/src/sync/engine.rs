@@ -138,68 +138,38 @@ impl SyncEngine {
         Ok(())
     }
 
-    pub async fn start(
-        &mut self,
-        hub_id: &str,
-        project_id: &str,
-        project_name: &str,
-        folder_id: Option<String>,
-    ) -> Result<()> {
-        info!("Starting sync for project: {} ({})", project_name, project_id);
-        if let Some(ref fid) = folder_id {
-            info!("  -> Specific folder: {}", fid);
-        }
+    pub async fn start_unified(&mut self) -> Result<()> {
+        info!("Starting unified sync for Autodesk Drive");
 
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-        let sync_root = std::path::PathBuf::from(local_app_data)
+        let default_mount = std::path::PathBuf::from(local_app_data)
             .join("Tether")
-            .join("Sync")
-            .join(project_name.replace(
-                |c: char| !c.is_alphanumeric() && c != ' ' && c != '-' && c != '_',
-                "",
-            ));
+            .join("Drive");
+            
+        let sync_root = match &self.settings.drive_mount_path {
+            Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
+            _ => default_mount,
+        };
 
         std::fs::create_dir_all(&sync_root)?;
         self.sync_root_path = Some(sync_root.clone());
         self.status = SyncStatus::Idle;
 
-        let root_folder_id = if let Some(fid) = folder_id {
-            fid
-        } else {
-            let token = self
-                .auth
-                .get_access_token()
-                .map_err(|e| anyhow::anyhow!("Auth failed: {e}"))?;
-            let folders = self
-                .data_mgmt
-                .get_top_folders(&token, hub_id, project_id)
-                .await?;
-
-            let project_files_folder = folders
-                .iter()
-                .find(|f| f.attributes.display_name.contains("Project Files"))
-                .or_else(|| folders.first())
-                .cloned();
-
-            let root_folder = project_files_folder
-                .ok_or_else(|| anyhow::anyhow!("No 'Project Files' folder found in project!"))?;
-
-            root_folder.id.clone()
-        };
+        let synced_folders = self.settings.synced_folders.clone();
 
         let sync_root_db_id = {
             let db = self.db.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
             let local_path = sync_root.to_str().unwrap_or(".");
-            if let Some(existing) = db.find_sync_root(hub_id, project_id, &root_folder_id, local_path)? {
+            if let Some(existing) = db.find_sync_root("unified", "unified", "unified", local_path)? {
                 existing
             } else {
-                db.insert_sync_root(hub_id, project_id, &root_folder_id, local_path, project_name)?
+                db.insert_sync_root("unified", "unified", "unified", local_path, "Tether Drive")?
             }
         };
         self.sync_root_db_id = Some(sync_root_db_id.clone());
-        self.current_hub_id = Some(hub_id.to_string());
-        self.current_project_id = Some(project_id.to_string());
-        self.current_root_folder_id = Some(root_folder_id.clone());
+        self.current_hub_id = Some("unified".to_string());
+        self.current_project_id = Some("unified".to_string());
+        self.current_root_folder_id = Some("unified".to_string());
 
         let (upload_tx, mut upload_rx) = tokio::sync::mpsc::unbounded_channel();
         let save_patterns = Arc::new(Mutex::new(SavePatternCoalescer::new()));
@@ -225,15 +195,14 @@ impl SyncEngine {
             self.auth.clone(),
             self.data_mgmt.clone(),
             self.storage.clone(),
-            project_id.to_string(),
-            root_folder_id.clone(),
+            synced_folders.clone(),
             Some(self.db.clone()),
             Some(sync_root_db_id.clone()),
             upload_tx,
             save_patterns.clone(),
         ));
 
-        let provider_name = format!("Tether - {}", project_name);
+        let provider_name = "Tether Drive".to_string();
         tether_cfapi::register_sync_root(&provider_name, "1.0.0", &sync_root)?;
         let connection = tether_cfapi::connect_sync_root(&sync_root, provider)?;
         self.cf_connection = Some(connection);
@@ -246,7 +215,7 @@ impl SyncEngine {
             self.data_mgmt.clone(),
             self.auth.clone(),
             self.db.clone(),
-            project_id.to_string(),
+            "unified".to_string(),
         )
         .await;
 
@@ -258,8 +227,6 @@ impl SyncEngine {
             let auth_clone = self.auth.clone();
             let data_clone = self.data_mgmt.clone();
             let db_clone = self.db.clone();
-            let pid = project_id.to_string();
-            let fid = root_folder_id;
             let poll_root_id = sync_root_db_id.clone();
             let poll_sync_root = sync_root.clone();
             let interval_secs = self.settings.sync_interval_secs;
@@ -270,8 +237,7 @@ impl SyncEngine {
                     data_clone,
                     db_clone,
                     move || auth_clone.get_access_token().map_err(|e| anyhow::anyhow!("{e}")),
-                    pid,
-                    fid,
+                    synced_folders,
                     poll_root_id,
                     poll_sync_root,
                     tx,

@@ -65,8 +65,7 @@ pub async fn start_polling(
     api: ApsDataManagementClient,
     db: std::sync::Arc<std::sync::Mutex<SyncDatabase>>,
     token_getter: impl Fn() -> Result<String> + Send + 'static,
-    project_id: String,
-    root_folder_id: String,
+    synced_folders: Vec<crate::config::settings::SyncedFolderConfig>,
     sync_root_id: String,
     sync_root_path: PathBuf,
     tx: mpsc::Sender<CloudChange>,
@@ -88,8 +87,7 @@ pub async fn start_polling(
         if let Err(e) = poll_once(
             &api,
             &token,
-            &project_id,
-            &root_folder_id,
+            &synced_folders,
             &db,
             &sync_root_id,
             &sync_root_path,
@@ -105,8 +103,7 @@ pub async fn start_polling(
 async fn poll_once(
     api: &ApsDataManagementClient,
     token: &str,
-    project_id: &str,
-    root_folder_id: &str,
+    synced_folders: &[crate::config::settings::SyncedFolderConfig],
     db: &std::sync::Arc<std::sync::Mutex<SyncDatabase>>,
     sync_root_id: &str,
     sync_root_path: &Path,
@@ -117,8 +114,17 @@ async fn poll_once(
         db.get_all_file_entries(sync_root_id)?
     };
 
-    let mut stack: VecDeque<(String, String, usize)> = VecDeque::new();
-    stack.push_back((root_folder_id.to_string(), String::new(), 0));
+    let mut stack: VecDeque<(String, String, String, usize)> = VecDeque::new();
+    for folder in synced_folders {
+        if folder.enabled {
+            stack.push_back((
+                folder.project_id.clone(),
+                folder.folder_id.clone(),
+                folder.display_name.clone(),
+                0,
+            ));
+        }
+    }
 
     let mut seen_cloud_item_ids: HashSet<String> = HashSet::new();
 
@@ -129,7 +135,7 @@ async fn poll_once(
         .map(|e| e.local_relative_path.as_str())
         .collect();
 
-    while let Some((folder_id, rel_prefix, depth)) = stack.pop_front() {
+    while let Some((project_id, folder_id, rel_prefix, depth)) = stack.pop_front() {
         if depth > MAX_FOLDER_DEPTH {
             warn!(
                 "Skipping folder at depth {} (max {}) under {:?}",
@@ -139,7 +145,7 @@ async fn poll_once(
         }
 
         let cloud_items = api
-            .get_folder_contents(token, project_id, &folder_id)
+            .get_folder_contents(token, &project_id, &folder_id)
             .await?;
 
         for item in &cloud_items {
@@ -147,7 +153,7 @@ async fn poll_once(
             let rel_path = join_rel(&rel_prefix, name);
 
             if item.item_type == "folders" {
-                stack.push_back((item.id.clone(), rel_path, depth + 1));
+                stack.push_back((project_id.clone(), item.id.clone(), rel_path, depth + 1));
                 continue;
             }
 
@@ -155,10 +161,11 @@ async fn poll_once(
                 continue;
             }
 
-            seen_cloud_item_ids.insert(item.id.clone());
+            let full_item_id = format!("{}|{}", project_id, item.id);
+            seen_cloud_item_ids.insert(full_item_id.clone());
 
             let existing = local_entries.iter().find(|e| {
-                e.cloud_item_id.as_deref() == Some(item.id.as_str())
+                e.cloud_item_id.as_deref() == Some(full_item_id.as_str())
             });
 
             match existing {
@@ -171,7 +178,7 @@ async fn poll_once(
                             send_change(
                                 tx,
                                 CloudChange::Updated {
-                                    cloud_item_id: item.id.clone(),
+                                    cloud_item_id: full_item_id.clone(),
                                     local_relative_path: rel_path.clone(),
                                     file_size: item.attributes.storage_size.unwrap_or(0),
                                 },
@@ -195,7 +202,7 @@ async fn poll_once(
                     send_change(
                         tx,
                         CloudChange::Added {
-                            cloud_item_id: item.id.clone(),
+                            cloud_item_id: full_item_id.clone(),
                             local_relative_path: rel_path.clone(),
                             file_size: item.attributes.storage_size.unwrap_or(0),
                         },

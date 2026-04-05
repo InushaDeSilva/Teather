@@ -33,7 +33,7 @@ pub struct ApsCloudProvider {
     auth: ApsAuthClient,
     data_mgmt: ApsDataManagementClient,
     storage: ApsStorageClient,
-    project_id: String,
+    synced_folders: Vec<crate::config::settings::SyncedFolderConfig>,
     /// Maps local relative paths (from sync root) → cloud folder IDs.
     /// The root folder ("") is inserted at construction time.
     folder_map: Mutex<HashMap<PathBuf, String>>,
@@ -51,8 +51,7 @@ impl ApsCloudProvider {
         auth: ApsAuthClient,
         data_mgmt: ApsDataManagementClient,
         storage: ApsStorageClient,
-        project_id: String,
-        root_folder_id: String,
+        synced_folders: Vec<crate::config::settings::SyncedFolderConfig>,
         state_db: Option<Arc<Mutex<SyncDatabase>>>,
         sync_root_id: Option<String>,
         upload_tx: UnboundedSender<(PathBuf, String)>,
@@ -60,14 +59,20 @@ impl ApsCloudProvider {
     ) -> Self {
         let mut map = HashMap::new();
         // Empty path = the sync root itself
-        map.insert(PathBuf::new(), root_folder_id);
+        map.insert(PathBuf::new(), "".to_string());
+        for folder in &synced_folders {
+            if folder.enabled {
+                let cloud_folder_id = format!("{}|{}", folder.project_id, folder.folder_id);
+                map.insert(PathBuf::from(&folder.display_name), cloud_folder_id);
+            }
+        }
 
         Self {
             runtime,
             auth,
             data_mgmt,
             storage,
-            project_id,
+            synced_folders,
             folder_map: Mutex::new(map),
             state_db,
             sync_root_id,
@@ -80,14 +85,33 @@ impl ApsCloudProvider {
 
 impl CloudProvider for ApsCloudProvider {
     fn list_folder_contents(&self, cloud_folder_id: &str) -> Result<Vec<CloudFileInfo>> {
+        if cloud_folder_id.is_empty() {
+             let mut out = Vec::new();
+             for folder in &self.synced_folders {
+                 if folder.enabled {
+                     out.push(CloudFileInfo {
+                         name: folder.display_name.clone(),
+                         is_directory: true,
+                         size: 0,
+                         cloud_id: format!("{}|{}", folder.project_id, folder.folder_id),
+                         last_modified: None,
+                         created: None,
+                     });
+                 }
+             }
+             return Ok(out);
+        }
+
         let token = self
             .auth
             .get_access_token()
             .context("Failed to get access token for folder listing")?;
 
+        let (project_id, real_folder_id) = cloud_folder_id.split_once('|').unwrap_or(("", cloud_folder_id));
+
         let items = self.runtime.block_on(
             self.data_mgmt
-                .get_folder_contents(&token, &self.project_id, cloud_folder_id),
+                .get_folder_contents(&token, project_id, real_folder_id),
         )?;
 
         let mut out = Vec::with_capacity(items.len());
@@ -115,7 +139,7 @@ impl CloudProvider for ApsCloudProvider {
             if !is_directory && size == 0 {
                 if let Ok(versions) = self.runtime.block_on(
                     self.data_mgmt
-                        .get_item_versions(&token, &self.project_id, &item.id),
+                        .get_item_versions(&token, project_id, &item.id),
                 ) {
                     if let Some(v) = versions.first() {
                         size = v.attributes.storage_size.unwrap_or(0);
@@ -126,7 +150,7 @@ impl CloudProvider for ApsCloudProvider {
                 name: item.attributes.display_name.clone(),
                 is_directory,
                 size,
-                cloud_id: item.id.clone(),
+                cloud_id: format!("{}|{}", project_id, item.id),
                 last_modified: item.attributes.last_modified_time.clone(),
                 created: item.attributes.create_time.clone(),
             });
@@ -150,7 +174,8 @@ impl CloudProvider for ApsCloudProvider {
                 };
                 row.sync_root_id = sync_root_id.clone();
                 row.local_relative_path = rel;
-                row.cloud_item_id = Some(item.id.clone());
+                let full_item_id = format!("{}|{}", project_id, item.id);
+                row.cloud_item_id = Some(full_item_id);
                 row.file_size = Some(size as i64);
                 row.last_cloud_modified = item.attributes.last_modified_time.clone();
                 row.sync_state = "in_sync".into();
@@ -175,6 +200,7 @@ impl CloudProvider for ApsCloudProvider {
     }
 
     fn download_file_content(&self, cloud_item_id: &str) -> Result<Vec<u8>> {
+        let (project_id, real_item_id) = cloud_item_id.split_once('|').unwrap_or(("", cloud_item_id));
         let token = self
             .auth
             .get_access_token()
@@ -183,7 +209,7 @@ impl CloudProvider for ApsCloudProvider {
         // 1. Get item versions → extract storage URN from the latest version
         let versions = self.runtime.block_on(
             self.data_mgmt
-                .get_item_versions(&token, &self.project_id, cloud_item_id),
+                .get_item_versions(&token, project_id, real_item_id),
         )?;
 
         let active_version = versions
@@ -249,6 +275,7 @@ impl CloudProvider for ApsCloudProvider {
     }
 
     fn delete_cloud_item(&self, cloud_item_id: &str, item_display_name: &str) -> Result<()> {
+        let (project_id, real_item_id) = cloud_item_id.split_once('|').unwrap_or(("", cloud_item_id));
         let token = self
             .auth
             .get_access_token()
@@ -256,8 +283,8 @@ impl CloudProvider for ApsCloudProvider {
         self.runtime.block_on(
             self.data_mgmt.delete_item_as_deleted_version(
                 &token,
-                &self.project_id,
-                cloud_item_id,
+                project_id,
+                real_item_id,
                 item_display_name,
             ),
         )?;
@@ -265,24 +292,25 @@ impl CloudProvider for ApsCloudProvider {
     }
 
     fn delete_cloud_folder_recursive(&self, cloud_folder_id: &str) -> Result<()> {
+        let (project_id, real_folder_id) = cloud_folder_id.split_once('|').unwrap_or(("", cloud_folder_id));
         let token = self
             .auth
             .get_access_token()
             .context("Failed to get access token for folder delete")?;
-        let project_id = self.project_id.clone();
         let dm = self.data_mgmt.clone();
         self.runtime
-            .block_on(delete_folder_recursive(&dm, &token, &project_id, cloud_folder_id))
+            .block_on(delete_folder_recursive(&dm, &token, project_id, real_folder_id))
     }
 
     fn rename_cloud_item(&self, cloud_item_id: &str, new_name: &str) -> Result<()> {
+        let (project_id, real_item_id) = cloud_item_id.split_once('|').unwrap_or(("", cloud_item_id));
         let token = self
             .auth
             .get_access_token()
             .context("Failed to get access token for rename")?;
         let versions = self.runtime.block_on(
             self.data_mgmt
-                .get_item_versions(&token, &self.project_id, cloud_item_id),
+                .get_item_versions(&token, project_id, real_item_id),
         )?;
         let vid = versions
             .first()
@@ -290,7 +318,7 @@ impl CloudProvider for ApsCloudProvider {
             .context("No versions for item rename")?;
         self.runtime.block_on(self.data_mgmt.patch_version_name(
             &token,
-            &self.project_id,
+            project_id,
             vid,
             new_name,
         ))?;
@@ -298,14 +326,15 @@ impl CloudProvider for ApsCloudProvider {
     }
 
     fn rename_cloud_folder(&self, cloud_folder_id: &str, new_name: &str) -> Result<()> {
+        let (project_id, real_folder_id) = cloud_folder_id.split_once('|').unwrap_or(("", cloud_folder_id));
         let token = self
             .auth
             .get_access_token()
             .context("Failed to get access token for folder rename")?;
         self.runtime.block_on(self.data_mgmt.patch_folder_display_name(
             &token,
-            &self.project_id,
-            cloud_folder_id,
+            project_id,
+            real_folder_id,
             new_name,
         ))?;
         Ok(())

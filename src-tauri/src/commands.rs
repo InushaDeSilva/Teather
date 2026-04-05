@@ -232,6 +232,34 @@ pub async fn get_drive_view(state: State<'_, AppState>) -> Result<Vec<DriveItemI
 }
 
 #[tauri::command]
+pub async fn auto_discover_drive_folders(state: State<'_, AppState>) -> Result<Vec<tether_core::config::settings::SyncedFolderConfig>, String> {
+    let items = {
+        let engine = state.engine.lock().await;
+        let token = engine.auth.get_access_token().map_err(|e| format!("{e:#}"))?;
+        engine.data_mgmt.get_drive_view(&token).await.map_err(|e| format!("{e:#}"))?
+    };
+
+    let mut folders = Vec::new();
+    for item in items {
+        if item.depth == 0 {
+            folders.push(tether_core::config::settings::SyncedFolderConfig {
+                display_name: item.name,
+                hub_id: item.hub_id,
+                project_id: item.project_id,
+                folder_id: item.folder_id,
+                enabled: true,
+            });
+        }
+    }
+
+    let mut engine = state.engine.lock().await;
+    engine.settings.synced_folders = folders.clone();
+    engine.settings.save().map_err(|e| format!("{e:#}"))?;
+
+    Ok(folders)
+}
+
+#[tauri::command]
 pub async fn resolve_drive_folder(
     state: State<'_, AppState>,
     folder_urn: String,
@@ -315,16 +343,12 @@ pub async fn open_sync_folder(state: State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn start_sync(
+pub async fn start_unified_sync(
     state: State<'_, AppState>,
-    hub_id: String,
-    project_id: String,
-    project_name: String,
-    folder_id: Option<String>,
 ) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
     engine
-        .start(&hub_id, &project_id, &project_name, folder_id)
+        .start_unified()
         .await
         .map_err(|e| format!("{e:#}"))?;
     Ok(())

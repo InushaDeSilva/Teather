@@ -8,6 +8,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Tether — idle (open window for queue)")
         .on_tray_icon_event(|tray_handle, event| {
+            tauri_plugin_positioner::on_tray_event(tray_handle.app_handle(), &event);
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -18,6 +19,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     if window.is_visible().unwrap_or(false) {
                         let _ = window.hide();
                     } else {
+                        use tauri_plugin_positioner::{WindowExt, Position};
+                        let _ = window.move_window(Position::TrayBottomCenter);
                         let _ = window.show();
                         let _ = window.set_focus();
                     }

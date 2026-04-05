@@ -20,11 +20,11 @@ function makePNG(w, h) {
                 continue;
             }
 
-            // Gradient: top-left indigo → bottom-right violet
+            // Gradient: top-left dark grey (60,60,60) → bottom-right rust orange (228,102,36)
             const t = (x / w + y / h) / 2;
-            const bgR = Math.floor(99 + t * 40);   // 99→139
-            const bgG = Math.floor(102 - t * 40);  // 102→62
-            const bgB = Math.floor(241 - t * 30);  // 241→211
+            const bgR = Math.floor(60 + t * 168);  // 60→228
+            const bgG = Math.floor(60 + t * 42);   // 60→102
+            const bgB = Math.floor(60 - t * 24);   // 60→36
 
             // ── Foreground: two circles + connecting line ──
             const d1 = Math.sqrt((x - cx1) ** 2 + (y - cy1) ** 2);

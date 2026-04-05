@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncedFolderConfig {
+    pub hub_id: String,
+    pub project_id: String,
+    pub folder_id: String,
+    pub display_name: String,
+    pub enabled: bool,
+}
+
 /// Application settings, persisted to disk as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -26,6 +35,18 @@ pub struct AppSettings {
 
     /// Log level filter (e.g. "info", "debug", "trace").
     pub log_level: String,
+
+    /// Root mount path for the unified Autodesk Drive.
+    pub drive_mount_path: Option<String>,
+    
+    /// Cached list of synced folder URNs (auto-discovered from home).
+    pub synced_folders: Vec<SyncedFolderConfig>,
+    
+    /// Whether to filter out Fusion 360 hubs.
+    pub filter_fusion_hubs: bool,
+    
+    /// Last successful authentication state.
+    pub last_auth_state: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -39,6 +60,10 @@ impl Default for AppSettings {
             bandwidth_limit_down_kbps: 0,
             start_with_windows: false,
             log_level: "info".into(),
+            drive_mount_path: None,
+            synced_folders: Vec::new(),
+            filter_fusion_hubs: true,
+            last_auth_state: None,
         }
     }
 }

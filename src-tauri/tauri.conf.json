@@ -13,10 +13,13 @@
         "label": "main",
         "title": "Tether",
         "url": "index.html",
-        "width": 480,
-        "height": 640,
-        "resizable": true,
-        "center": true
+        "width": 380,
+        "height": 550,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "skipTaskbar": true,
+        "hiddenTitle": true
       }
     ],
     "trayIcon": {

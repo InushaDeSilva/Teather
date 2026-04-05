@@ -8,7 +8,7 @@ tether-core = { path = "../crates/tether-core" }
 tether-cfapi = { path = "../crates/tether-cfapi" }
 
 tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-positioner = "2"
+tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"

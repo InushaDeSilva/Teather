@@ -1,22 +1,22 @@
 /* ── Tether — Design System ── */
 
 :root {
-    --bg-primary: #0f0f14;
-    --bg-secondary: #1a1a24;
-    --bg-card: #1e1e2a;
-    --bg-card-hover: #252535;
-    --text-primary: #e8e8f0;
-    --text-secondary: #9090a8;
-    --text-muted: #606078;
-    --accent: #6366f1;
-    --accent-hover: #818cf8;
-    --accent-glow: rgba(99, 102, 241, 0.15);
-    --success: #34d399;
+    --bg-primary: #1e1e1e; /* Desktop Connector Grey base */
+    --bg-secondary: #2d2d30;
+    --bg-card: #252526;
+    --bg-card-hover: #3e3e42;
+    --text-primary: #ffffff;
+    --text-secondary: #cccccc;
+    --text-muted: #8a8a8a;
+    --accent: #d95c2e; /* Rust Orange */
+    --accent-hover: #eb6b3b;
+    --accent-glow: rgba(217, 92, 46, 0.15);
+    --success: #4ade80;
     --warning: #fbbf24;
     --error: #f87171;
-    --border: rgba(255, 255, 255, 0.06);
-    --radius: 12px;
-    --radius-sm: 8px;
+    --border: #3e3e42;
+    --radius: 8px;
+    --radius-sm: 4px;
     --font: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
     --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -33,47 +33,52 @@ body {
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
+    user-select: none;
+    cursor: default;
 }
 
 .app {
     display: flex;
     flex-direction: column;
     height: 100vh;
-    padding: 20px;
-    gap: 16px;
+    padding: 16px;
+    gap: 12px;
 }
 
 /* ── Header ── */
 .header {
-    text-align: center;
-    padding: 16px 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    -webkit-app-region: drag; /* Makes it draggable in frameless mode */
 }
 
 .logo {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 10px;
+    gap: 8px;
 }
 
 .logo-icon {
-    font-size: 28px;
-    filter: drop-shadow(0 0 8px var(--accent));
+    width: 24px;
+    height: 24px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 14px;
+    color: white;
 }
 
 .logo h1 {
-    font-size: 24px;
-    font-weight: 700;
-    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    letter-spacing: -0.5px;
-}
-
-.subtitle {
-    color: var(--text-secondary);
-    font-size: 13px;
-    margin-top: 4px;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.3px;
 }
 
 /* ── Views ── */
@@ -83,6 +88,7 @@ body {
     gap: 12px;
     flex: 1;
     animation: fadeIn 0.3s ease;
+    overflow-y: auto;
 }
 
 .view.active {
@@ -90,7 +96,7 @@ body {
 }
 
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(8px); }
+    from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: translateY(0); }
 }
 
@@ -99,7 +105,7 @@ body {
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 20px;
+    padding: 16px;
     transition: background var(--transition);
 }
 
@@ -108,22 +114,24 @@ body {
 }
 
 .card h2 {
-    font-size: 16px;
+    font-size: 14px;
     font-weight: 600;
-    margin-bottom: 8px;
+    margin-bottom: 6px;
 }
 
 .card h3 {
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 600;
+    text-transform: uppercase;
     color: var(--text-secondary);
-    margin-bottom: 12px;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
 }
 
 .card p {
     color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 12px;
+    line-height: 1.4;
 }
 
 /* ── Buttons ── */
@@ -131,11 +139,11 @@ body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    padding: 10px 20px;
+    gap: 6px;
+    padding: 8px 16px;
     border: none;
     border-radius: var(--radius-sm);
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     transition: all var(--transition);
@@ -143,18 +151,20 @@ body {
 }
 
 .btn-primary {
-    background: linear-gradient(135deg, var(--accent), #8b5cf6);
+    background: var(--accent);
     color: white;
-    box-shadow: 0 2px 12px var(--accent-glow);
+    box-shadow: 0 2px 8px var(--accent-glow);
     width: 100%;
-    margin-top: 16px;
-    padding: 12px;
+    padding: 10px;
 }
 
-.btn-primary:hover {
-    background: linear-gradient(135deg, var(--accent-hover), #a78bfa);
-    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
-    transform: translateY(-1px);
+.btn-primary:not(:disabled):hover {
+    background: var(--accent-hover);
+}
+
+.btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .btn-secondary {
@@ -166,7 +176,7 @@ body {
 
 .btn-secondary:hover {
     background: var(--bg-card-hover);
-    border-color: var(--accent);
+    border-color: var(--text-muted);
 }
 
 /* ── Sync Status ── */
@@ -177,20 +187,20 @@ body {
 }
 
 .status-icon {
-    font-size: 24px;
-    width: 40px;
-    height: 40px;
+    font-size: 18px;
+    width: 32px;
+    height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    background: rgba(52, 211, 153, 0.1);
+    background: rgba(74, 222, 128, 0.1);
     color: var(--success);
     flex-shrink: 0;
 }
 
 .meta {
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-muted);
     margin-top: 2px;
 }
@@ -200,69 +210,68 @@ body {
     list-style: none;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
 }
 
 .activity-list li {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 12px;
+    flex-direction: column;
+    justify-content: center;
+    padding: 8px 10px;
     border-radius: var(--radius-sm);
     background: var(--bg-secondary);
-    font-size: 13px;
+    font-size: 12px;
+    color: var(--text-primary);
+    border: 1px solid transparent;
 }
 
 .activity-list li.empty {
     color: var(--text-muted);
-    justify-content: center;
+    align-items: center;
     font-style: italic;
+    background: transparent;
+    border: 1px dashed var(--border);
 }
 
+/* ── Prompts ── */
 .prompt-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    margin-top: 12px;
+    gap: 8px;
+    margin-top: 8px;
 }
 
 .prompt-card {
     background: var(--bg-secondary);
-    border: 1px solid var(--border);
+    border: 1px solid var(--warning);
     border-radius: var(--radius-sm);
-    padding: 12px;
+    padding: 10px;
 }
 
-.prompt-card p {
-    margin-top: 6px;
+.prompt-card strong {
+    color: var(--warning);
+    font-size: 12px;
 }
 
 .prompt-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 10px;
+    gap: 6px;
+    margin-top: 8px;
 }
 
 .btn-small {
-    padding: 8px 12px;
-    font-size: 12px;
+    padding: 6px 10px;
+    font-size: 11px;
     flex: 0 0 auto;
 }
 
 /* ── Actions ── */
 .actions {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     margin-top: auto;
-}
-
-/* ── Status text ── */
-.status-text {
-    color: var(--text-muted);
-    font-size: 12px;
-    text-align: center;
-    margin-top: 8px;
+    padding-top: 12px;
 }
 
 /* ── Loading ── */
@@ -270,27 +279,23 @@ body {
     color: var(--text-muted);
     text-align: center;
     font-style: italic;
+    font-size: 12px;
 }
 
-/* ── Tree list (project picker) ── */
-.tree-list {
-    max-height: 400px;
-    overflow-y: auto;
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 6px;
 }
 
-.tree-item {
-    padding: 10px 12px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background var(--transition);
-    font-size: 14px;
+::-webkit-scrollbar-track {
+    background: transparent;
 }
 
-.tree-item:hover {
-    background: var(--bg-card-hover);
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
 }
 
-.tree-item.selected {
-    background: var(--accent-glow);
-    border-left: 3px solid var(--accent);
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
 }

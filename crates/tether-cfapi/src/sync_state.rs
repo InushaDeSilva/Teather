@@ -88,25 +88,18 @@ fn get_file_attributes(path: &Path) -> u32 {
 
 /// Mark a populated file as in-sync (and convert it from a regular file to a placeholder if necessary).
 pub fn mark_placeholder_in_sync(path: &Path, cloud_item_id: &str) -> anyhow::Result<()> {
-    let mut is_cloud_file_error = false;
-    
     if let Ok(mut ph) = Placeholder::open(path) {
         if let Err(e) = ph.mark_in_sync(true, None) {
             let err_str = format!("{:?}", e);
-            if err_str.contains("0x80070178") || err_str.contains("not a cloud file") {
-                is_cloud_file_error = true;
-            } else {
+            if !err_str.contains("0x80070178") && !err_str.contains("not a cloud file") {
                 return Err(anyhow::anyhow!("CfSetInSyncState: {e:?}"));
             }
         } else {
             return Ok(());
         }
-    } else {
-        is_cloud_file_error = true;
     }
 
-    if is_cloud_file_error {
-        // If it's not a cloud file, we can convert it into a hydrated placeholder
+    // If it's not a cloud file, we can convert it into a hydrated placeholder
         // using CfConvertToPlaceholder so the sync engine tracks it and it gets
         // the green check badge.
         let f = std::fs::OpenOptions::new()

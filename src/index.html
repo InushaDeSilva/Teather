@@ -8,33 +8,23 @@
 </head>
 <body>
     <div class="app">
-        <header class="header">
-            <div class="logo">
-                <span class="logo-icon">⚡</span>
-                <h1>Tether</h1>
+        <header class="header" data-tauri-drag-region>
+            <div class="logo" data-tauri-drag-region>
+                <div class="logo-icon" data-tauri-drag-region>T</div>
+                <h1 data-tauri-drag-region>Tether</h1>
             </div>
-            <p class="subtitle">Autodesk Cloud Sync</p>
+            <p class="meta" style="color:var(--text-muted); margin-top:2px;" data-tauri-drag-region>Autodesk Drive Sync</p>
         </header>
 
         <!-- Login View -->
         <div id="login-view" class="view active">
-            <div class="card">
-                <h2>Connect your Autodesk account</h2>
-                <p>Sign in to access your BIM 360 and ACC projects.</p>
+            <div class="card" style="margin-top:auto; margin-bottom:auto; text-align:center;">
+                <h2 style="margin-bottom:12px; font-size:16px;">Connect account</h2>
+                <p style="margin-bottom:20px;">Sign in to access your Autodesk Drive.</p>
                 <button id="btn-login" class="btn btn-primary">
                     Sign in with Autodesk
                 </button>
-                <p id="login-status" class="status-text"></p>
-            </div>
-        </div>
-
-        <!-- Project Picker View -->
-        <div id="picker-view" class="view">
-            <div class="card">
-                <h2>Select a project folder</h2>
-                <div id="hub-list" class="tree-list">
-                    <p class="loading">Loading hubs...</p>
-                </div>
+                <p id="login-status" class="status-text" style="margin-top:16px; min-height:16px;"></p>
             </div>
         </div>
 
@@ -44,546 +34,279 @@
                 <div class="sync-status">
                     <span id="status-icon" class="status-icon">✓</span>
                     <div>
-                        <strong id="status-text">Up to date</strong>
-                        <p id="last-sync" class="meta">Last synced: just now</p>
-                        <p id="service-state" class="meta">Service: disabled</p>
+                        <strong id="status-text" style="font-size:13px;">Up to date</strong>
+                        <p id="service-state" class="meta">Service: starting...</p>
                     </div>
                 </div>
             </div>
 
-            <div class="card">
-                <h3>Sync queue</h3>
-                <p class="meta">Worker jobs (upload/download). Explorer’s own “Sync pending” clears after upload finishes. Tray tooltip updates every few seconds.</p>
-                <p id="queue-summary" class="meta" style="margin-top:6px;"></p>
-                <ul id="queue-jobs" class="activity-list">
-                    <li class="empty">No jobs queued</li>
-                </ul>
-            </div>
-
-            <div class="card">
-                <h3>Recent Activity</h3>
-                <ul id="activity-list" class="activity-list">
-                    <li class="empty">No activity yet</li>
-                </ul>
-            </div>
-
-            <div class="actions">
-                <button id="btn-open-folder" class="btn btn-secondary">📁 Open sync folder</button>
-                <button id="btn-pause" class="btn btn-secondary">⏸ Pause syncing</button>
-                <button id="btn-service" class="btn btn-secondary">📡 Go offline</button>
-            </div>
-
-            <div class="card">
-                <h3>Prompts &amp; Offline Queue</h3>
-                <p class="meta">Conflict resolution, delete confirmations, and queued offline operations.</p>
-                <div id="prompt-list" class="prompt-list">
-                    <p class="meta">No prompts waiting.</p>
-                </div>
-                <div style="margin-top:12px;">
-                    <h3 style="margin-bottom:8px;">Offline journal</h3>
-                    <ul id="journal-list" class="activity-list">
-                        <li class="empty">No offline operations queued</li>
+            <div class="card" style="flex:1; display:flex; flex-direction:column; overflow:hidden; padding: 12px 16px;">
+                <h3 style="margin-bottom:8px;">Recent Activity</h3>
+                <div style="flex:1; overflow-y:auto;">
+                    <ul id="activity-list" class="activity-list">
+                        <li class="empty">No recent activity</li>
                     </ul>
                 </div>
             </div>
 
-            <div class="card">
-                <h3>Troubleshooter &amp; parity tools</h3>
-                <p class="meta">Session info, activity tail, diagnostics bundle (see <code>tests/PARITY_TEST_MATRIX.md</code>).</p>
-                <pre id="troubleshooter-out" style="max-height:140px;overflow:auto;font-size:11px;background:#1a1a1f;padding:8px;border-radius:6px;"></pre>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
-                    <button type="button" id="btn-trouble-report" class="btn btn-secondary">Refresh report</button>
-                    <button type="button" id="btn-diagnostics" class="btn btn-secondary">Export diagnostics ZIP</button>
-                </div>
-                <p id="diag-path" class="meta" style="margin-top:8px;"></p>
-                <label class="meta" for="ipj-input">Inventor project (.ipj) path</label>
-                <input type="text" id="ipj-input" placeholder="C:\Projects\MyProject.ipj" style="width:100%;margin:6px 0;padding:8px;border-radius:6px;border:1px solid #333;background:#111;color:#eee;">
-                <button type="button" id="btn-save-ipj" class="btn btn-secondary">Save IPJ</button>
+            <div class="card" id="prompts-card" style="display:none; padding:12px 16px; border-color:var(--warning);">
+                <h3 style="color:var(--warning); margin-bottom:4px;">Action Required</h3>
+                <div id="prompt-list" class="prompt-list"></div>
+            </div>
+
+            <div class="actions">
+                <button id="btn-open-folder" class="btn btn-secondary">📁 Open folder</button>
+                <button id="btn-pause" class="btn btn-secondary">⏸ Pause</button>
+                <button id="btn-service" class="btn btn-secondary">📡 Go offline</button>
             </div>
         </div>
     </div>
 
     <script>
         const { invoke } = window.__TAURI__.core;
+        
+        let discoveryComplete = false;
 
-        // ── Login ──
-        document.getElementById('btn-login').addEventListener('click', async () => {
-            try {
-                document.getElementById('login-status').textContent = 'Waiting for browser login...';
-                await invoke('start_login');
-                document.getElementById('login-status').textContent = 'Login successful!';
-                
-                // Transition to project picker
-                document.getElementById('login-view').classList.remove('active');
-                document.getElementById('picker-view').classList.add('active');
-                loadHubs();
-            } catch (e) {
-                document.getElementById('login-status').textContent = 'Error: ' + e;
-            }
-        });
-
-        // ── Auto Login Check ──
-        window.addEventListener('DOMContentLoaded', async () => {
+        async function initFlow() {
             try {
                 const isLoggedIn = await invoke('check_auth_status');
                 if (isLoggedIn) {
-                    document.getElementById('login-view').classList.remove('active');
-                    document.getElementById('picker-view').classList.add('active');
-                    loadHubs();
+                    await proceedToSync();
                 }
             } catch (e) {
-                console.error("Auto-login check failed:", e);
+                console.error("Auto-login fast start failed:", e);
+            }
+        }
+
+        async function proceedToSync() {
+            const ls = document.getElementById('login-status');
+            try {
+                ls.textContent = 'Discovering folders...';
+                if (!discoveryComplete) {
+                   await invoke('auto_discover_drive_folders');
+                   discoveryComplete = true;
+                }
+                
+                ls.textContent = 'Starting sync engine...';
+                await invoke('start_unified_sync');
+                
+                document.getElementById('login-view').classList.remove('active');
+                document.getElementById('status-view').classList.add('active');
+                pollStatus();
+            } catch (e) {
+                ls.textContent = 'Error: ' + e;
+                ls.style.color = 'var(--error)';
+            }
+        }
+
+        // Login Handler
+        document.getElementById('btn-login').addEventListener('click', async () => {
+            const btn = document.getElementById('btn-login');
+            const ls = document.getElementById('login-status');
+            try {
+                btn.disabled = true;
+                ls.textContent = 'Waiting for browser login...';
+                ls.style.color = 'var(--text-muted)';
+                await invoke('start_login');
+                ls.textContent = 'Login successful!';
+                ls.style.color = 'var(--success)';
+                await proceedToSync();
+            } catch (e) {
+                ls.textContent = 'Login failed: ' + e;
+                ls.style.color = 'var(--error)';
+                btn.disabled = false;
             }
         });
 
-        // ── Project Picker ──
-        async function loadHubs() {
-            const list = document.getElementById('hub-list');
-            try {
-                list.innerHTML = '<i>Loading your Autodesk Drive...</i>';
-                
-                // 1. Load the Flat Drive View (Aggregated Folders)
-                const driveItems = await invoke('get_drive_view');
-                list.innerHTML = '';
-
-                // Create "Autodesk Drive" virtual hub
-                const driveHub = document.createElement('div');
-                driveHub.className = 'tree-item hub-item selected';
-                driveHub.innerHTML = `<strong>☁️ Autodesk Drive</strong> <small style="color:#666; margin-left:8px;">(Personal & Shared)</small>`;
-                list.appendChild(driveHub);
-
-                const driveContainer = document.createElement('div');
-                driveContainer.className = 'projects-container';
-                list.appendChild(driveContainer);
-
-                if (driveItems.length === 0) {
-                    driveContainer.innerHTML = '<p class="empty" style="margin-left:20px;">No folders found in Drive.</p>';
-                } else {
-                    for (const item of driveItems) {
-                        const indent = 20 + (item.depth || 0) * 20;
-                        if (item.depth === 0) {
-                            const header = document.createElement('div');
-                            header.className = 'tree-item';
-                            header.style.marginLeft = '20px';
-                            header.style.marginTop = '8px';
-                            header.style.opacity = '0.7';
-                            header.style.fontSize = '12px';
-                            header.innerHTML = `📂 ${item.name}`;
-                            driveContainer.appendChild(header);
-                        } else {
-                            appendFolderRow(driveContainer, item, indent);
-                        }
-                    }
-                }
-
-                // 2. "Add from Drive URL" input
-                const urlSection = document.createElement('div');
-                urlSection.style.cssText = 'margin: 12px 0; padding: 10px; border: 1px dashed #444; border-radius: 8px;';
-                urlSection.innerHTML = `
-                    <div style="font-size:12px; color:#999; margin-bottom:6px;">📎 Paste an Autodesk Drive link to add a hidden folder:</div>
-                    <div style="display:flex; gap:6px;">
-                        <input id="drive-url-input" type="text" placeholder="https://drive.autodesk.com/folders/..." 
-                               style="flex:1; padding:6px 8px; border-radius:6px; border:1px solid #555; background:#1a1a24; color:#e8e8f0; font-size:12px;">
-                        <button id="drive-url-btn" style="padding:6px 12px; border-radius:6px; border:none; background:#4a6cf7; color:white; cursor:pointer; font-size:12px; white-space:nowrap;">Add folder</button>
-                    </div>
-                    <div id="drive-url-status" style="font-size:11px; margin-top:4px; color:#888;"></div>
-                `;
-                list.appendChild(urlSection);
-
-                document.getElementById('drive-url-btn').onclick = async () => {
-                    const input = document.getElementById('drive-url-input');
-                    const status = document.getElementById('drive-url-status');
-                    const rawUrl = input.value.trim();
-                    if (!rawUrl) return;
-
-                    const match = rawUrl.match(/drive\.autodesk\.com\/folders\/([A-Za-z0-9_-]+)/);
-                    if (!match) {
-                        status.style.color = '#f55';
-                        status.textContent = 'Invalid Autodesk Drive URL.';
-                        return;
-                    }
-
-                    try {
-                        status.style.color = '#888';
-                        status.textContent = 'Resolving folder...';
-                        const b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
-                        const folderUrn = atob(b64);
-
-                        const resolved = await invoke('resolve_drive_folder', { folderUrn: folderUrn });
-                        status.style.color = '#4f4';
-                        status.textContent = 'Found: ' + resolved.name;
-                        input.value = '';
-
-                        appendFolderRow(driveContainer, resolved, 20);
-                    } catch (e) {
-                        status.style.color = '#f55';
-                        status.textContent = 'Error: ' + e;
-                    }
-                };
-
-                // 3. Load "Advanced" section for Hub/Project hierarchy
-                const advancedHeader = document.createElement('div');
-                advancedHeader.className = 'tree-item';
-                advancedHeader.style.marginTop = '20px';
-                advancedHeader.style.borderTop = '1px solid #333';
-                advancedHeader.style.paddingTop = '15px';
-                advancedHeader.innerHTML = `<strong>🛠️ All Projects (Advanced)</strong>`;
-                list.appendChild(advancedHeader);
-
-                const hubs = await invoke('get_hubs');
-                for (const hub of hubs) {
-                    const div = document.createElement('div');
-                    div.className = 'tree-item';
-                    div.style.marginLeft = '10px';
-                    const isFusion = (hub.extension_type || "").includes("core:Hub");
-                    div.innerHTML = `<span>${isFusion ? '🏗️' : '🏢'} ${hub.name}</span>`;
-                    div.onclick = () => loadProjects(hub.id, div);
-                    list.appendChild(div);
-                }
-            } catch (e) {
-                list.innerHTML = `<p class="error">Error: ${e}</p>`;
-            }
-        }
-
-        function appendFolderRow(container, item, indent) {
-            const row = document.createElement('div');
-            row.className = 'tree-item project-item';
-            row.style.marginLeft = indent + 'px';
-            row.style.display = 'flex';
-            row.style.alignItems = 'center';
-            row.style.gap = '4px';
-
-            const expandBtn = document.createElement('span');
-            expandBtn.textContent = '▶';
-            expandBtn.style.cursor = 'pointer';
-            expandBtn.style.fontSize = '10px';
-            expandBtn.style.width = '16px';
-            expandBtn.style.flexShrink = '0';
-            expandBtn.title = 'Browse subfolders';
-
-            const label = document.createElement('span');
-            label.style.cursor = 'pointer';
-            label.innerHTML = `📁 ${item.name}`;
-            label.title = 'Sync this folder';
-
-            row.appendChild(expandBtn);
-            row.appendChild(label);
-            container.appendChild(row);
-
-            const childContainer = document.createElement('div');
-            childContainer.style.display = 'none';
-            container.appendChild(childContainer);
-
-            let loaded = false;
-            expandBtn.onclick = async (e) => {
-                e.stopPropagation();
-                if (childContainer.style.display === 'none') {
-                    childContainer.style.display = 'block';
-                    expandBtn.textContent = '▼';
-                    if (!loaded) {
-                        loaded = true;
-                        childContainer.innerHTML = '<p class="loading" style="margin-left:' + (indent + 20) + 'px; font-size:12px;">Loading...</p>';
-                        try {
-                            const subfolders = await invoke('get_subfolders', {
-                                projectId: item.project_id,
-                                folderId: item.folder_id
-                            });
-                            childContainer.innerHTML = '';
-                            if (subfolders.length === 0) {
-                                const empty = document.createElement('p');
-                                empty.style.marginLeft = (indent + 20) + 'px';
-                                empty.style.fontSize = '12px';
-                                empty.style.color = '#888';
-                                empty.textContent = 'No subfolders';
-                                childContainer.appendChild(empty);
-                            } else {
-                                for (const sf of subfolders) {
-                                    appendFolderRow(childContainer, {
-                                        name: sf.name,
-                                        hub_id: item.hub_id,
-                                        project_id: item.project_id,
-                                        folder_id: sf.id
-                                    }, indent + 20);
-                                }
-                            }
-                        } catch (err) {
-                            childContainer.innerHTML = '<p class="error" style="margin-left:' + (indent + 20) + 'px; font-size:12px;">Error: ' + err + '</p>';
-                        }
-                    }
-                } else {
-                    childContainer.style.display = 'none';
-                    expandBtn.textContent = '▶';
-                }
-            };
-
-            label.onclick = async (e) => {
-                e.stopPropagation();
-                try {
-                    await invoke('start_sync', {
-                        hubId: item.hub_id,
-                        projectId: item.project_id,
-                        projectName: item.name,
-                        folderId: item.folder_id
-                    });
-                    showStatusView();
-                } catch (err) {
-                    alert('Failed to start sync: ' + err);
-                }
-            };
-        }
-
-        function showStatusView() {
-            document.getElementById('picker-view').classList.remove('active');
-            document.getElementById('status-view').classList.add('active');
-            loadTroubleshooter();
-            loadIpj();
-            loadPromptCenter();
-        }
-
-        async function loadTroubleshooter() {
-            const out = document.getElementById('troubleshooter-out');
-            try {
-                const session = await invoke('get_sync_session');
-                const report = await invoke('get_troubleshooter_report');
-                const lines = [
-                    JSON.stringify(session, null, 2),
-                    '--- Activity ---',
-                    ...(report.activity_lines || []).slice(0, 15),
-                    '--- Pending jobs ---',
-                    ...(report.pending_job_summaries || []).slice(0, 10),
-                ];
-                out.textContent = lines.join('\n');
-            } catch (e) {
-                out.textContent = 'Troubleshooter: ' + e;
-            }
-        }
-
-        async function loadIpj() {
-            try {
-                const p = await invoke('get_inventor_ipj');
-                if (p) document.getElementById('ipj-input').value = p;
-            } catch (_) {}
-        }
-
-        async function resolvePrompt(id, resolution) {
-            try {
-                await invoke('resolve_pending_prompt', { promptId: id, resolution });
-                await loadPromptCenter();
-                await pollStatus();
-                await loadTroubleshooter();
-            } catch (e) {
-                alert('Prompt resolution failed: ' + e);
-            }
-        }
-
-        async function loadPromptCenter() {
-            const promptList = document.getElementById('prompt-list');
-            const journalList = document.getElementById('journal-list');
-            try {
-                const prompts = await invoke('list_pending_prompts');
-                promptList.innerHTML = '';
-                if (!prompts.length) {
-                    promptList.innerHTML = '<p class="meta">No prompts waiting.</p>';
-                } else {
-                    for (const prompt of prompts) {
-                        const wrap = document.createElement('div');
-                        wrap.className = 'prompt-card';
-                        wrap.innerHTML = `
-                            <strong>${prompt.kind.replaceAll('_', ' ')}</strong>
-                            <p>${prompt.message}</p>
-                            <p class="meta">${prompt.relative_path}</p>
-                        `;
-                        const actions = document.createElement('div');
-                        actions.className = 'prompt-actions';
-
-                        const buttons = prompt.kind === 'delete_confirm'
-                            ? [
-                                ['Delete Local', 'delete_local_only'],
-                                ['Delete Local + Cloud', 'delete_local_and_cloud'],
-                                ['Cancel', 'cancel'],
-                            ]
-                            : [
-                                ['Keep Both', 'keep_both'],
-                                ['Keep Local', 'keep_local'],
-                                ['Keep Cloud', 'keep_cloud'],
-                                ['Cancel', 'cancel'],
-                            ];
-
-                        for (const [label, value] of buttons) {
-                            const btn = document.createElement('button');
-                            btn.className = 'btn btn-secondary btn-small';
-                            btn.textContent = label;
-                            btn.onclick = () => resolvePrompt(prompt.id, value);
-                            actions.appendChild(btn);
-                        }
-                        wrap.appendChild(actions);
-                        promptList.appendChild(wrap);
-                    }
-                }
-
-                const journal = await invoke('list_operation_journal');
-                journalList.innerHTML = '';
-                if (!journal.length) {
-                    journalList.innerHTML = '<li class="empty">No offline operations queued</li>';
-                } else {
-                    for (const row of journal) {
-                        const li = document.createElement('li');
-                        li.textContent = `${row.operation_type} — ${row.relative_path || '(root)'} [${row.status}]`;
-                        journalList.appendChild(li);
-                    }
-                }
-            } catch (e) {
-                promptList.innerHTML = '<p class="error">Prompt center error: ' + e + '</p>';
-                journalList.innerHTML = '<li class="empty">Unable to load offline queue</li>';
-            }
-        }
-
-        async function loadProjects(hubId, selectedElement) {
-            // Remove any existing project list from other hubs
-            document.querySelectorAll('#hub-list .advanced-projects-container').forEach(el => el.remove());
-
-            const projContainer = document.createElement('div');
-            projContainer.className = 'projects-container advanced-projects-container';
-            projContainer.innerHTML = '<p class="loading" style="margin-left: 30px;">Loading...</p>';
-            selectedElement.insertAdjacentElement('afterend', projContainer);
-
-            try {
-                const projects = await invoke('get_projects', { hubId });
-                projContainer.innerHTML = '';
-                for (const proj of projects) {
-                    const div = document.createElement('div');
-                    div.className = 'tree-item project-item';
-                    div.style.marginLeft = '30px';
-                    div.innerHTML = `<span>📁 ${proj.name}</span>`;
-                    div.onclick = async () => {
-                        try {
-                            await invoke('start_sync', { 
-                                hubId: hubId, 
-                                projectId: proj.id, 
-                                projectName: proj.name,
-                                folderId: null 
-                            });
-                            showStatusView();
-                        } catch (e) {
-                            alert('Failed to start sync: ' + e);
-                        }
-                    };
-                    projContainer.appendChild(div);
-                }
-            } catch (e) {
-                projContainer.innerHTML = `<p class="error" style="margin-left: 30px;">Error: ${e}</p>`;
-            }
-        }
-
-        // ── Sync status polling ──
+        // Sync Polling
         async function pollStatus() {
+            if (!document.getElementById('status-view').classList.contains('active')) return;
+            
             try {
                 const resp = await invoke('get_sync_status');
                 const statusText = document.getElementById('status-text');
                 const statusIcon = document.getElementById('status-icon');
                 const serviceState = document.getElementById('service-state');
                 const serviceButton = document.getElementById('btn-service');
+                
                 if (serviceState) {
                     serviceState.textContent = 'Service: ' + (resp.service_state || 'unknown');
                 }
+                
                 if (serviceButton) {
                     serviceButton.textContent = (resp.service_state === 'offline' || resp.service_state === 'disabled')
-                        ? '📡 Go online'
-                        : '📡 Go offline';
-                }
-
-                const summary = document.getElementById('queue-summary');
-                const qList = document.getElementById('queue-jobs');
-                if (summary && qList) {
-                    const n = resp.queued_count ?? 0;
-                    const jobs = resp.queue_jobs || [];
-                    summary.textContent =
-                        n === 0
-                            ? 'Queue empty.'
-                            : `${n} job(s) in queue — ${jobs.length} shown below`;
-                    qList.innerHTML = '';
-                    if (jobs.length === 0) {
-                        const li = document.createElement('li');
-                        li.className = n > 0 ? 'empty' : 'empty';
-                        li.textContent = n > 0 ? '(Tasks are running or snapshot empty — wait a tick.)' : 'No jobs queued';
-                        qList.appendChild(li);
-                    } else {
-                        for (const j of jobs) {
-                            const li = document.createElement('li');
-                            const short = j.cloud_item_id
-                                ? ` — ${String(j.cloud_item_id).slice(0, 18)}…`
-                                : '';
-                            li.textContent = `${j.operation} — ${j.local_path}${short}`;
-                            li.title = j.queued_at_rfc3339 || '';
-                            qList.appendChild(li);
-                        }
-                    }
+                        ? '📡 Go online' : '📡 Go offline';
                 }
 
                 if (resp.status === 'Idle') {
-                    statusIcon.textContent = '✓';
-                    statusText.textContent =
-                        (resp.queued_count ?? 0) > 0 ? `Sync busy (${resp.queued_count} queued)` : 'Up to date';
+                    const activeJobs = resp.queued_count ?? 0;
+                    if (activeJobs > 0) {
+                        statusIcon.textContent = '⟳';
+                        statusIcon.style.background = 'rgba(99, 102, 241, 0.1)';
+                        statusIcon.style.color = 'var(--accent-hover)';
+                        statusText.textContent = `Syncing (${activeJobs} queued)`;
+                    } else {
+                        statusIcon.textContent = '✓';
+                        statusIcon.style.background = 'rgba(74, 222, 128, 0.1)';
+                        statusIcon.style.color = 'var(--success)';
+                        statusText.textContent = 'Up to date';
+                    }
                 } else if (resp.status === 'Paused') {
                     statusIcon.textContent = '⏸';
+                    statusIcon.style.background = 'rgba(136, 136, 136, 0.1)';
+                    statusIcon.style.color = 'var(--text-muted)';
                     statusText.textContent = 'Paused';
-                } else if (typeof resp.status === 'object' && resp.status.Syncing) {
-                    statusIcon.textContent = '⟳';
-                    statusText.textContent = `Syncing ${resp.status.Syncing.active_count} files...`;
-                } else if (typeof resp.status === 'object' && resp.status.Error) {
-                    statusIcon.textContent = '✕';
-                    statusText.textContent = 'Error: ' + resp.status.Error.message;
+                } else if (typeof resp.status === 'object') {
+                    if (resp.status.Syncing) {
+                        statusIcon.textContent = '⟳';
+                        statusIcon.style.background = 'rgba(99, 102, 241, 0.1)';
+                        statusIcon.style.color = 'var(--accent-hover)';
+                        statusText.textContent = `Syncing ${resp.status.Syncing.active_count} actions...`;
+                    } else if (resp.status.Error) {
+                        statusIcon.textContent = '✕';
+                        statusIcon.style.background = 'rgba(248, 113, 113, 0.1)';
+                        statusIcon.style.color = 'var(--error)';
+                        statusText.textContent = 'Error: ' + resp.status.Error.message;
+                    }
                 }
+
+                // Update Report (Journal / Activity)
+                const report = await invoke('get_troubleshooter_report');
+                const aList = document.getElementById('activity-list');
+                
+                // Construct activity
+                const activities = [];
+                if (resp.queue_jobs && resp.queue_jobs.length > 0) {
+                    for(const j of resp.queue_jobs.slice(0,3)) {
+                        activities.push(`⏳ ${j.operation}: ${j.local_path}`);
+                    }
+                }
+                
+                if (report.activity_lines && report.activity_lines.length > 0) {
+                    for(const line of report.activity_lines.slice(0,5)) {
+                        // "2023-10-27T...: pull [success] folder/file — details"
+                        const parts = line.split(/:\s|\s\[|\]\s|—/);
+                        if (parts.length >= 4) {
+                            activities.push(`✓ ${parts[1]}: ${parts[3]}`);
+                        } else {
+                            activities.push(`✓ ${line}`);
+                        }
+                    }
+                }
+                
+                aList.innerHTML = '';
+                if (activities.length === 0) {
+                    aList.innerHTML = '<li class="empty">No recent activity</li>';
+                } else {
+                    activities.slice(0,6).forEach(text => {
+                        const li = document.createElement('li');
+                        li.textContent = text;
+                        li.title = text;
+                        li.style.whiteSpace = 'nowrap';
+                        li.style.overflow = 'hidden';
+                        li.style.textOverflow = 'ellipsis';
+                        aList.appendChild(li);
+                    });
+                }
+                
+                await loadPromptCenter();
             } catch (e) {
-                console.log('Status poll error:', e);
+                console.error('Poll error:', e);
             }
         }
 
-        // ── Actions ──
-        document.getElementById('btn-open-folder')?.addEventListener('click', () => invoke('open_sync_folder'));
-        document.getElementById('btn-pause')?.addEventListener('click', async () => {
+        async function resolvePrompt(id, resolution) {
+            try {
+                await invoke('resolve_pending_prompt', { promptId: id, resolution });
+                pollStatus();
+            } catch (e) {
+                alert('Resolution failed: ' + e);
+            }
+        }
+
+        async function loadPromptCenter() {
+            try {
+                const prompts = await invoke('list_pending_prompts');
+                const card = document.getElementById('prompts-card');
+                const list = document.getElementById('prompt-list');
+                
+                if (!prompts || prompts.length === 0) {
+                    card.style.display = 'none';
+                    list.innerHTML = '';
+                    return;
+                }
+                
+                card.style.display = 'block';
+                list.innerHTML = '';
+                
+                for (const prompt of prompts) {
+                    const wrap = document.createElement('div');
+                    wrap.className = 'prompt-card';
+                    
+                    const title = prompt.kind.replaceAll('_', ' ').toUpperCase();
+                    wrap.innerHTML = `
+                        <strong>${title}</strong>
+                        <p style="font-size:11px; margin-top:4px; color:var(--text-primary);">${prompt.message}</p>
+                        <p class="meta" style="margin-top:2px;">${prompt.relative_path}</p>
+                    `;
+                    
+                    const actions = document.createElement('div');
+                    actions.className = 'prompt-actions';
+
+                    const buttons = prompt.kind === 'delete_confirm'
+                        ? [
+                            ['Delete Local', 'delete_local_only'],
+                            ['Delete Both', 'delete_local_and_cloud'],
+                            ['Cancel', 'cancel'],
+                        ] : [
+                            ['Keep Both', 'keep_both'],
+                            ['Keep Local', 'keep_local'],
+                            ['Keep Cloud', 'keep_cloud'],
+                            ['Cancel', 'cancel'],
+                        ];
+
+                    for (const [label, value] of buttons) {
+                        const btn = document.createElement('button');
+                        btn.className = 'btn btn-secondary btn-small';
+                        btn.textContent = label;
+                        btn.onclick = () => resolvePrompt(prompt.id, value);
+                        actions.appendChild(btn);
+                    }
+                    
+                    wrap.appendChild(actions);
+                    list.appendChild(wrap);
+                }
+            } catch (e) {
+                console.error("Prompts error:", e);
+            }
+        }
+
+        // Action Handlers
+        document.getElementById('btn-open-folder').addEventListener('click', () => invoke('open_sync_folder'));
+        
+        document.getElementById('btn-pause').addEventListener('click', async () => {
             const btn = document.getElementById('btn-pause');
             if (btn.textContent.includes('Pause')) {
                 await invoke('pause_sync');
-                btn.textContent = '▶ Resume syncing';
+                btn.textContent = '▶ Resume';
             } else {
                 await invoke('resume_sync');
-                btn.textContent = '⏸ Pause syncing';
+                btn.textContent = '⏸ Pause';
             }
         });
-        document.getElementById('btn-service')?.addEventListener('click', async () => {
+        
+        document.getElementById('btn-service').addEventListener('click', async () => {
             const label = document.getElementById('btn-service').textContent || '';
             const next = label.includes('online') ? 'running' : 'offline';
             await invoke('set_service_state', { serviceState: next });
-            await pollStatus();
-            await loadPromptCenter();
+            pollStatus();
         });
 
-        document.getElementById('btn-trouble-report')?.addEventListener('click', loadTroubleshooter);
-        document.getElementById('btn-diagnostics')?.addEventListener('click', async () => {
-            const el = document.getElementById('diag-path');
-            try {
-                const path = await invoke('collect_diagnostics_bundle');
-                el.textContent = 'Saved: ' + path;
-            } catch (e) {
-                el.textContent = 'Error: ' + e;
-            }
-        });
-        document.getElementById('btn-save-ipj')?.addEventListener('click', async () => {
-            const v = document.getElementById('ipj-input').value.trim();
-            try {
-                await invoke('set_inventor_ipj', { ipjPath: v || null });
-                alert('IPJ path saved.');
-            } catch (e) {
-                alert('Failed: ' + e);
-            }
-        });
-
-        // Poll status every 5 seconds
-        setInterval(async () => {
-            await pollStatus();
-            await loadPromptCenter();
-        }, 5000);
+        // Initialize application
+        window.addEventListener('DOMContentLoaded', initFlow);
+        
+        // Loop
+        setInterval(pollStatus, 4000);
     </script>
 </body>
 </html>

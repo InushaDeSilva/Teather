@@ -28,6 +28,11 @@ impl ApsDataManagementClient {
         let mut drive_items = Vec::new();
 
         for hub in hubs {
+            let hub_is_fusion = hub.attributes.extension.as_ref().map_or(false, |e| e.type_code.contains("core:Hub"));
+            if hub_is_fusion {
+                continue;
+            }
+
             let h_id = hub.id.clone();
             match self.get_projects(token, &h_id).await {
                 Ok(projects) => {
@@ -501,7 +506,7 @@ impl ApsDataManagementClient {
                 }
             });
 
-            let (status, text) = self.post_versions_jsonapi(token, &url, &body_minimal).await?;
+            let (status, _text) = self.post_versions_jsonapi(token, &url, &body_minimal).await?;
             if status.is_success() {
                 return Ok(());
             }
