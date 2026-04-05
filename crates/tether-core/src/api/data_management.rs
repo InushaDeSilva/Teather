@@ -455,17 +455,31 @@ impl ApsDataManagementClient {
         project_id: &str,
         item_id: &str,
         display_name: &str,
-    ) -> Result<VersionInfo> {
-        let url = format!("{BASE_URL}/data/v1/projects/{project_id}/versions");
+    ) -> Result<()> {
+        let mut last_status = StatusCode::BAD_REQUEST;
+        let mut last_text = String::new();
 
+        // 1. Try Undocumented HTTP DELETE to the item endpoint
+        let enc_item = urlencoding::encode(item_id);
+        let delete_url = format!("{BASE_URL}/data/v1/projects/{project_id}/items/{enc_item}");
+        let resp = self
+            .http
+            .delete(&delete_url)
+            .bearer_auth(token)
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        // 2. Try POSTing an explicit 'Deleted' version schema (For BIM360 / ACC Docs)
+        let url = format!("{BASE_URL}/data/v1/projects/{project_id}/versions");
         let extension_types = [
             "versions:autodesk.core:Deleted",
             "versions:autodesk.bim360:Deleted",
             "versions:autodesk.a360:Deleted",
         ];
-
-        let mut last_status = StatusCode::BAD_REQUEST;
-        let mut last_text = String::new();
 
         for ext_type in extension_types {
             // First try minimal payload
@@ -489,8 +503,7 @@ impl ApsDataManagementClient {
 
             let (status, text) = self.post_versions_jsonapi(token, &url, &body_minimal).await?;
             if status.is_success() {
-                let result: JsonApiResponse<VersionInfo> = serde_json::from_str(&text)?;
-                return Ok(result.data);
+                return Ok(());
             }
 
             // Retry with the name attribute
@@ -515,15 +528,14 @@ impl ApsDataManagementClient {
 
             let (status, text) = self.post_versions_jsonapi(token, &url, &body_named).await?;
             if status.is_success() {
-                let result: JsonApiResponse<VersionInfo> = serde_json::from_str(&text)?;
-                return Ok(result.data);
+                return Ok(());
             }
 
             last_status = status;
             last_text = text;
         }
 
-        anyhow::bail!("Delete item (Deleted version) failed ({}): {}", last_status, last_text);
+        anyhow::bail!("Delete item failed (PATCH and POST versions). Last error ({}): {}", last_status, last_text);
     }
 
     async fn post_versions_jsonapi(
