@@ -53,6 +53,11 @@ pub fn create_placeholder_file(
 /// if the file was dehydrated, `false` if it was already cloud-only or not a
 /// placeholder.
 pub fn dehydrate_if_hydrated(path: &Path) -> anyhow::Result<bool> {
+    // Quick attribute check — if the file is cloud-only, there's nothing to
+    // dehydrate and we must NOT call File::open() below (it would hydrate it).
+    if crate::sync_state::is_cloud_only_attr(path) {
+        return Ok(false);
+    }
     let ph = match Placeholder::open(path) {
         Ok(p) => p,
         Err(_) => return Ok(false),

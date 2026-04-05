@@ -153,7 +153,7 @@ async fn process_task(
         }
         SyncOperation::DeleteLocal => process_delete_local(task, db).await,
         SyncOperation::CreateFolder => {
-            if !task.local_path.exists() {
+            if !tether_cfapi::path_exists_no_recall(&task.local_path) {
                 std::fs::create_dir_all(&task.local_path)?;
                 debug!("Created folder {}", task.local_path.display());
             }
@@ -203,7 +203,7 @@ async fn process_download(
     let (bucket_key, object_key) = parse_storage_urn(&storage_urn)?;
 
     if let Some(parent) = task.local_path.parent() {
-        if !parent.exists() {
+        if !tether_cfapi::path_exists_no_recall(parent) {
             std::fs::create_dir_all(parent)?;
         }
     }
@@ -247,7 +247,7 @@ async fn process_download(
         }
     }
 
-    let local_newer = match (task.local_path.exists(), cloud_modified) {
+    let local_newer = match (tether_cfapi::path_exists_no_recall(&task.local_path), cloud_modified) {
         (true, Some(cloud_t)) => std::fs::metadata(&task.local_path)
             .ok()
             .and_then(|m| m.modified().ok())
@@ -306,7 +306,7 @@ async fn process_upload_existing(
     db: &Arc<Mutex<SyncDatabase>>,
     project_id: &str,
 ) -> anyhow::Result<()> {
-    if tether_cfapi::is_cloud_only_placeholder(&task.local_path) {
+    if tether_cfapi::is_cloud_only_attr(&task.local_path) {
         info!(
             "Skipping upload for cloud-only placeholder {}",
             task.local_path.display()
@@ -389,7 +389,7 @@ async fn process_create_remote_file(
     db: &Arc<Mutex<SyncDatabase>>,
     project_id: &str,
 ) -> anyhow::Result<()> {
-    if tether_cfapi::is_cloud_only_placeholder(&task.local_path) {
+    if tether_cfapi::is_cloud_only_attr(&task.local_path) {
         info!(
             "Skipping remote create for cloud-only placeholder {}",
             task.local_path.display()
@@ -519,9 +519,9 @@ async fn process_delete_cloud(
         guard
             .get_file_entry_by_path(sync_root_id, &rel)?
             .map(|e| e.is_directory)
-            .unwrap_or_else(|| task.local_path.is_dir())
+            .unwrap_or_else(|| tether_cfapi::is_dir_no_recall(&task.local_path))
     } else {
-        task.local_path.is_dir()
+        tether_cfapi::is_dir_no_recall(&task.local_path)
     };
 
     if is_directory {
@@ -556,10 +556,10 @@ async fn process_delete_cloud(
 }
 
 async fn process_delete_local(task: &SyncTask, db: &Arc<Mutex<SyncDatabase>>) -> anyhow::Result<()> {
-    if task.local_path.is_dir() {
+    if tether_cfapi::is_dir_no_recall(&task.local_path) {
         return Ok(());
     }
-    if task.local_path.exists() {
+    if tether_cfapi::path_exists_no_recall(&task.local_path) {
         tokio::fs::remove_file(&task.local_path).await?;
     }
     if let (Some(sync_root_id), Some(sync_root_path)) = (&task.sync_root_id, &task.sync_root_path) {
@@ -601,7 +601,7 @@ fn stale_conflict_details(
     ) {
         return Ok(None);
     }
-    if !task.local_path.exists() {
+    if !tether_cfapi::path_exists_no_recall(&task.local_path) {
         return Ok(None);
     }
     let local_changed = std::fs::metadata(&task.local_path)
@@ -765,10 +765,12 @@ fn fail_journal(db: &Arc<Mutex<SyncDatabase>>, task: &SyncTask, error_text: &str
 /// Clear Explorer "Sync pending" after we wrote cloud bytes (best-effort).
 fn try_mark_downloaded_in_sync(path: &Path) {
     if let Err(e) = tether_cfapi::mark_placeholder_in_sync(path) {
-        debug!(
-            "mark_placeholder_in_sync after transfer (non-fatal) {}: {e:#}",
+        warn!(
+            "mark_placeholder_in_sync failed for {}: {e:#}",
             path.display()
         );
+    } else {
+        info!("Marked in-sync: {}", path.display());
     }
 }
 

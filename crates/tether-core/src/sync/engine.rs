@@ -289,11 +289,11 @@ impl SyncEngine {
                             file_size,
                         } => {
                             let full = root_clone.join(local_relative_path.replace('/', "\\"));
-                            if full.exists() {
+                            if tether_cfapi::path_exists_no_recall(&full) {
                                 continue;
                             }
                             if let Some(parent) = full.parent() {
-                                if !parent.exists() {
+                                if !tether_cfapi::path_exists_no_recall(parent) {
                                     continue;
                                 }
                                 let file_name = full
@@ -318,7 +318,12 @@ impl SyncEngine {
                             ..
                         } => {
                             let full = root_clone.join(local_relative_path.replace('/', "\\"));
-                            if !full.exists() {
+                            if !tether_cfapi::path_exists_no_recall(&full) {
+                                continue;
+                            }
+                            // Skip dehydration for cloud-only files — File::open()
+                            // would trigger hydration.
+                            if tether_cfapi::is_cloud_only_attr(&full) {
                                 continue;
                             }
                             match tether_cfapi::dehydrate_if_hydrated(&full) {
@@ -342,7 +347,7 @@ impl SyncEngine {
                             ..
                         } => {
                             let full = root_clone.join(local_relative_path.replace('/', "\\"));
-                            if full.exists() {
+                            if tether_cfapi::path_exists_no_recall(&full) {
                                 let _ = std::fs::remove_file(&full);
                             }
                         }
