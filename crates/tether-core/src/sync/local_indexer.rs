@@ -140,6 +140,12 @@ async fn reconcile_event_paths(
             continue;
         }
         let rel = relative_under_root(sync_root, &path);
+        
+        if sync_root_id == "unified" && !rel.contains('/') && !rel.is_empty() {
+            // Cannot create, upload, or delete depth-1 unified folders natively.
+            continue;
+        }
+        
         let known_row = known_by_rel.get(&rel);
 
         if let Some(row) = known_row {
@@ -419,6 +425,9 @@ pub async fn reconcile_local_state(
         if dir_rel.is_empty() {
             continue;
         }
+        if sync_root_id == "unified" && !dir_rel.contains('/') {
+            continue;
+        }
         if !known_by_rel.contains_key(dir_rel) {
             queue_or_journal(
                 sync_root,
@@ -436,6 +445,9 @@ pub async fn reconcile_local_state(
     }
 
     for file_rel in &local_files {
+        if sync_root_id == "unified" && !file_rel.contains('/') {
+            continue;
+        }
         if let Some((_, live_rel)) = deferred_archives
             .iter()
             .find(|(archive_rel, _)| archive_rel == file_rel)

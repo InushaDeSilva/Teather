@@ -95,7 +95,7 @@ pub async fn start_polling(
         )
         .await
         {
-            warn!("Cloud polling failed: {e}");
+            warn!("Cloud polling failed: {e:#}");
         }
     }
 }

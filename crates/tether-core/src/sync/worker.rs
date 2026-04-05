@@ -96,7 +96,7 @@ pub async fn start_workers(
                         q.finish(&task).await;
                     }
                     Err(e) => {
-                        error!("Task failed: {:?} - {}", task.operation, e);
+                        error!("Task failed: {:?} - {:#}", task.operation, e);
                         task.retry_count += 1;
                         if task.retry_count < 5 {
                             task.not_before = Some(Instant::now() + task.backoff_duration());
@@ -180,8 +180,10 @@ async fn process_download(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Download missing cloud_item_id"))?;
 
+    let (actual_project_id, real_item_id) = item_id.split_once('|').unwrap_or((project_id, item_id.as_str()));
+
     debug!("Fetching versions for item: {}", item_id);
-    let versions = data_mgmt.get_item_versions(token, project_id, item_id).await?;
+    let versions = data_mgmt.get_item_versions(token, actual_project_id, real_item_id).await?;
     let active_version = versions
         .first()
         .ok_or_else(|| anyhow::anyhow!("No versions found for item {}", item_id))?;
@@ -318,10 +320,12 @@ async fn process_upload_existing(
         .cloud_item_id
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Upload missing cloud_item_id"))?;
+    let (actual_project_id, real_item_id) = item_id.split_once('|').unwrap_or((project_id, item_id.as_str()));
+
     let (item, parent_folder_id) = data_mgmt
-        .get_item_with_parent_folder(token, project_id, item_id)
+        .get_item_with_parent_folder(token, actual_project_id, real_item_id)
         .await?;
-    let versions = data_mgmt.get_item_versions(token, project_id, item_id).await?;
+    let versions = data_mgmt.get_item_versions(token, actual_project_id, real_item_id).await?;
     let active_version = versions
         .first()
         .ok_or_else(|| anyhow::anyhow!("No remote versions for item {}", item_id))?;
@@ -364,14 +368,14 @@ async fn process_upload_existing(
 
     let file_name = item.attributes.display_name.clone();
     let loc = storage
-        .create_storage_location(token, project_id, &parent_folder_id, &file_name)
+        .create_storage_location(token, actual_project_id, &parent_folder_id, &file_name)
         .await?;
     storage
         .upload_file(token, &loc.bucket_key, &loc.object_key, &task.local_path)
         .await?;
 
     let version = data_mgmt
-        .create_version(token, project_id, item_id, &file_name, &loc.id)
+        .create_version(token, actual_project_id, real_item_id, &file_name, &loc.id)
         .await?;
     let storage_urn = version
         .relationships
@@ -427,8 +431,10 @@ async fn process_create_remote_file(
         .ok_or_else(|| anyhow::anyhow!("CreateRemoteFile missing sync_root_path"))?;
     let rel = relative_under_root(sync_root, &task.local_path);
     let parent_rel = parent_relative_path(&rel);
-    let parent_folder_id =
+    let parent_folder_urn =
         ensure_remote_folder(token, data_mgmt, db, project_id, sync_root_id, &parent_rel).await?;
+    let (actual_project_id, parent_folder_id) = parent_folder_urn.split_once('|').unwrap_or((project_id, parent_folder_urn.as_str()));
+
     let file_name = task
         .local_path
         .file_name()
@@ -436,11 +442,11 @@ async fn process_create_remote_file(
         .ok_or_else(|| anyhow::anyhow!("CreateRemoteFile missing file name"))?;
 
     let existing = data_mgmt
-        .find_folder_entry_by_name(token, project_id, &parent_folder_id, file_name)
+        .find_folder_entry_by_name(token, actual_project_id, parent_folder_id, file_name)
         .await?;
 
     let loc = storage
-        .create_storage_location(token, project_id, &parent_folder_id, file_name)
+        .create_storage_location(token, actual_project_id, parent_folder_id, file_name)
         .await?;
     storage
         .upload_file(token, &loc.bucket_key, &loc.object_key, &task.local_path)
@@ -448,10 +454,10 @@ async fn process_create_remote_file(
 
     let (item_id, version_id, cloud_modified, storage_urn) = if let Some(existing_item) = existing {
         let version = data_mgmt
-            .create_version(token, project_id, &existing_item.id, file_name, &loc.id)
+            .create_version(token, actual_project_id, &existing_item.id, file_name, &loc.id)
             .await?;
         (
-            existing_item.id,
+            format!("{}|{}", actual_project_id, existing_item.id),
             version.id.clone(),
             version.attributes.last_modified_time,
             version
@@ -464,14 +470,14 @@ async fn process_create_remote_file(
         )
     } else {
         let item = data_mgmt
-            .create_item(token, project_id, &parent_folder_id, file_name, &loc.id)
+            .create_item(token, actual_project_id, parent_folder_id, file_name, &loc.id)
             .await?;
-        let versions = data_mgmt.get_item_versions(token, project_id, &item.id).await?;
+        let versions = data_mgmt.get_item_versions(token, actual_project_id, &item.id).await?;
         let active = versions
             .first()
             .ok_or_else(|| anyhow::anyhow!("Created item missing version"))?;
         (
-            item.id,
+            format!("{}|{}", actual_project_id, item.id),
             active.id.clone(),
             active.attributes.last_modified_time.clone(),
             active
@@ -530,6 +536,7 @@ async fn process_delete_cloud(
         .cloud_item_id
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("DeleteCloud missing cloud_item_id"))?;
+    let (actual_project_id, real_item_id) = item_id.split_once('|').unwrap_or((project_id, item_id.as_str()));
 
     let is_directory = if let (Some(sync_root_id), Some(sync_root_path)) =
         (&task.sync_root_id, &task.sync_root_path)
@@ -546,7 +553,7 @@ async fn process_delete_cloud(
 
     if is_directory {
         let contents = data_mgmt
-            .get_folder_contents(token, project_id, item_id)
+            .get_folder_contents(token, actual_project_id, real_item_id)
             .await
             .unwrap_or_default();
         for child in contents {
@@ -554,7 +561,7 @@ async fn process_delete_cloud(
                 data_mgmt
                     .delete_item_as_deleted_version(
                         token,
-                        project_id,
+                        actual_project_id,
                         &child.id,
                         &child.attributes.display_name,
                     )
@@ -568,7 +575,7 @@ async fn process_delete_cloud(
             .and_then(|n| n.to_str())
             .unwrap_or("file");
         data_mgmt
-            .delete_item_as_deleted_version(token, project_id, item_id, display_name)
+            .delete_item_as_deleted_version(token, actual_project_id, real_item_id, display_name)
             .await?;
     }
 
@@ -684,8 +691,10 @@ async fn ensure_remote_folder(
     }
 
     let mut current_folder_id = root_folder_id;
+    let mut actual_project_id = project_id.to_string();
     let mut built_rel = String::new();
-    for segment in relative_dir.split('/').filter(|s| !s.is_empty()) {
+    
+    for (i, segment) in relative_dir.split('/').filter(|s| !s.is_empty()).enumerate() {
         if !built_rel.is_empty() {
             built_rel.push('/');
         }
@@ -698,26 +707,37 @@ async fn ensure_remote_folder(
                 .and_then(|row| if row.is_directory { row.cloud_item_id } else { None })
         } {
             current_folder_id = existing_id;
+            // update actual_project_id
+            if let Some((p, f)) = current_folder_id.split_once('|') {
+                actual_project_id = p.to_string();
+                current_folder_id = f.to_string();
+            }
             continue;
         }
 
+        if i == 0 {
+            // First segment MUST exist, because it is a synced folder root
+            anyhow::bail!("Cannot create items at the root of a unified Tether Drive space. The root is reserved for Synced Folders.");
+        }
+
         let folder_id = match data_mgmt
-            .find_folder_entry_by_name(token, project_id, &current_folder_id, segment)
+            .find_folder_entry_by_name(token, &actual_project_id, &current_folder_id, segment)
             .await?
         {
             Some(entry) if entry.item_type == "folders" => entry.id,
             Some(_) => anyhow::bail!("A file already exists where folder {} should be", built_rel),
             None => data_mgmt
-                .create_folder(token, project_id, &current_folder_id, segment)
+                .create_folder(token, &actual_project_id, &current_folder_id, segment)
                 .await?
                 .id,
         };
 
-        upsert_directory_entry(db, sync_root_id, &built_rel, &folder_id)?;
         current_folder_id = folder_id;
+        let unified_id = format!("{}|{}", actual_project_id, current_folder_id);
+        upsert_directory_entry(db, sync_root_id, &built_rel, &unified_id)?;
     }
 
-    Ok(current_folder_id)
+    Ok(format!("{}|{}", actual_project_id, current_folder_id))
 }
 
 fn upsert_directory_entry(

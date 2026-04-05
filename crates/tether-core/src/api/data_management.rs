@@ -28,8 +28,15 @@ impl ApsDataManagementClient {
         let mut drive_items = Vec::new();
 
         for hub in hubs {
-            let hub_is_fusion = hub.attributes.extension.as_ref().map_or(false, |e| e.type_code.contains("core:Hub"));
-            if hub_is_fusion {
+            let ext_code = hub.attributes.extension.as_ref().map_or("none", |e| e.type_code.as_str());
+            tracing::info!("HUB FOUND: name={}, id={}, type={}", hub.attributes.name, hub.id, ext_code);
+            let hub_is_fusion = ext_code == "autodesk.core:Hub" || ext_code == "autodesk.a360:PersonalHub" && false; // we'll refine this after seeing logs
+            if hub.attributes.name.to_lowercase().contains("fusion") {
+                tracing::info!("Skipping Fusion Hub by name: {}", hub.attributes.name);
+                continue;
+            }
+            if ext_code == "autodesk.core:Hub" {
+                tracing::info!("Skipping Fusion Hub by extension: {}", hub.attributes.name);
                 continue;
             }
 

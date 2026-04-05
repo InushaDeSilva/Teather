@@ -282,6 +282,47 @@ pub async fn resolve_drive_folder(
 }
 
 #[tauri::command]
+pub async fn add_synced_folder_url(
+    state: State<'_, AppState>,
+    folder_urn: String,
+) -> Result<(), String> {
+    let item = resolve_drive_folder(state.clone(), folder_urn).await?;
+    let mut engine = state.engine.lock().await;
+    
+    if !engine.settings.synced_folders.iter().any(|f| f.folder_id == item.folder_id) {
+        engine.settings.synced_folders.push(tether_core::config::settings::SyncedFolderConfig {
+            display_name: item.name,
+            hub_id: item.hub_id,
+            project_id: item.project_id,
+            folder_id: item.folder_id,
+            enabled: true,
+        });
+        engine.settings.save().map_err(|e| format!("{e:#}"))?;
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_synced_folders(
+    state: State<'_, AppState>,
+) -> Result<Vec<tether_core::config::settings::SyncedFolderConfig>, String> {
+    let engine = state.engine.lock().await;
+    Ok(engine.settings.synced_folders.clone())
+}
+
+#[tauri::command]
+pub async fn remove_synced_folder(
+    state: State<'_, AppState>,
+    folder_id: String,
+) -> Result<(), String> {
+    let mut engine = state.engine.lock().await;
+    engine.settings.synced_folders.retain(|f| f.folder_id != folder_id);
+    engine.settings.save().map_err(|e| format!("{e:#}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_subfolders(
     state: State<'_, AppState>,
     project_id: String,

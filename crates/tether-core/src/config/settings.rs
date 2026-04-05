@@ -11,6 +11,7 @@ pub struct SyncedFolderConfig {
 
 /// Application settings, persisted to disk as JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     /// Autodesk APS client ID.
     pub client_id: String,

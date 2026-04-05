@@ -123,7 +123,6 @@ pub fn mark_placeholder_in_sync(path: &Path, cloud_item_id: &str) -> anyhow::Res
             )
             .map_err(|e| anyhow::anyhow!("CfConvertToPlaceholder: {e}"))?;
         }
-    }
     
     Ok(())
 }

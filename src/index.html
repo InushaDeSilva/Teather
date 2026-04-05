@@ -54,6 +54,18 @@
                 <div id="prompt-list" class="prompt-list"></div>
             </div>
 
+            <div class="card" style="padding: 12px 16px;">
+                <h3 style="margin-bottom:8px;">Synced Projects</h3>
+                <div id="projects-list" style="margin-bottom: 8px; max-height: 100px; overflow-y: auto;">
+                    <!-- Project Items go here -->
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="drive-url-input" placeholder="Paste Autodesk Drive folder link..." class="input" style="flex: 1;" />
+                    <button id="btn-add-project" class="btn btn-primary" style="padding: 6px 12px;">Add</button>
+                </div>
+                <p id="project-add-status" style="margin-top: 6px; font-size: 12px; color: var(--warning);"></p>
+            </div>
+
             <div class="actions">
                 <button id="btn-open-folder" class="btn btn-secondary">📁 Open folder</button>
                 <button id="btn-pause" class="btn btn-secondary">⏸ Pause</button>
@@ -72,6 +84,7 @@
                 const isLoggedIn = await invoke('check_auth_status');
                 if (isLoggedIn) {
                     await proceedToSync();
+                    loadSyncedProjects();
                 }
             } catch (e) {
                 console.error("Auto-login fast start failed:", e);
@@ -300,6 +313,67 @@
             const next = label.includes('online') ? 'running' : 'offline';
             await invoke('set_service_state', { serviceState: next });
             pollStatus();
+        });
+
+        async function loadSyncedProjects() {
+            try {
+                const projects = await invoke('get_synced_folders');
+                const list = document.getElementById('projects-list');
+                list.innerHTML = '';
+                if (!projects || projects.length === 0) {
+                    list.innerHTML = '<div class="empty">No projects added yet</div>';
+                    return;
+                }
+                for (const proj of projects) {
+                    const el = document.createElement('div');
+                    el.style.display = 'flex';
+                    el.style.justifyContent = 'space-between';
+                    el.style.alignItems = 'center';
+                    el.style.padding = '4px 0';
+                    el.innerHTML = `
+                        <span style="font-size: 13px; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">📄 ${proj.display_name}</span>
+                        <button class="btn" style="background:transparent; color:var(--error); padding:2px;" onclick="removeProject('${proj.folder_id}')">✕</button>
+                    `;
+                    list.appendChild(el);
+                }
+            } catch (e) {
+                console.error("Load projects error:", e);
+            }
+        }
+
+        window.removeProject = async function(folderId) {
+            try {
+                await invoke('remove_synced_folder', { folderId });
+                document.getElementById('project-add-status').textContent = 'Removed. Restart Tether to apply changes.';
+                loadSyncedProjects();
+            } catch (e) {
+                alert('Remove failed: ' + e);
+            }
+        };
+
+        document.getElementById('btn-add-project').addEventListener('click', async () => {
+            const input = document.getElementById('drive-url-input');
+            const status = document.getElementById('project-add-status');
+            const rawUrl = input.value.trim();
+            if (!rawUrl) return;
+            
+            try {
+                status.textContent = 'Adding...';
+                const match = rawUrl.match(/drive\.autodesk\.com\/folders\/([A-Za-z0-9_-]+)/);
+                if (!match) {
+                    status.textContent = 'Invalid Autodesk Drive URL';
+                    return;
+                }
+                const b64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+                const folderUrn = atob(b64);
+                
+                await invoke('add_synced_folder_url', { folderUrn });
+                input.value = '';
+                status.textContent = 'Added securely! Please restart Tether to sync.';
+                loadSyncedProjects();
+            } catch (e) {
+                status.textContent = 'Error: ' + e;
+            }
         });
 
         // Initialize application
