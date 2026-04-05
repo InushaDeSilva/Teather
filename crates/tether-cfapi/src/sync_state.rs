@@ -86,12 +86,42 @@ fn get_file_attributes(path: &Path) -> u32 {
 
 // ── Handle-based (CfOpenFileWithOplock — does NOT trigger fetch_data) ────
 
-/// Mark a hydrated placeholder file as in sync with the cloud (Explorer badge clears).
-pub fn mark_placeholder_in_sync(path: &Path) -> anyhow::Result<()> {
-    let mut ph = Placeholder::open(path).map_err(|e| anyhow::anyhow!("open placeholder: {e:?}"))?;
-    ph.mark_in_sync(true, None)
-        .map_err(|e| anyhow::anyhow!("CfSetInSyncState: {e:?}"))?;
-    Ok(())
+/// Mark a populated file as in-sync (and convert it from a regular file to a placeholder if necessary).
+pub fn mark_placeholder_in_sync(path: &Path, cloud_item_id: &str) -> anyhow::Result<()> {
+    match Placeholder::open(path) {
+        Ok(mut ph) => {
+            ph.mark_in_sync(true, None)
+                .map_err(|e| anyhow::anyhow!("CfSetInSyncState: {e:?}"))?;
+            Ok(())
+        }
+        Err(err) => {
+            // If it's not a cloud file, we can convert it into a hydrated placeholder
+            // using CfConvertToPlaceholder so the sync engine tracks it and it gets
+            // the green check badge.
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("open for convert: {e}"))?;
+            
+            use std::os::windows::io::AsRawHandle;
+            let handle = windows::Win32::Foundation::HANDLE(f.as_raw_handle() as isize);
+            let blob = cloud_item_id.as_bytes();
+            
+            unsafe {
+                windows::Win32::Storage::CloudFilters::CfConvertToPlaceholder(
+                    handle,
+                    Some(blob.as_ptr() as *const std::ffi::c_void),
+                    blob.len() as u32,
+                    windows::Win32::Storage::CloudFilters::CF_CONVERT_FLAG_MARK_IN_SYNC,
+                    None,
+                    None,
+                )
+                .map_err(|e| anyhow::anyhow!("CfConvertToPlaceholder: {e}"))?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Returns `true` if the file has local bytes and is NOT in sync (i.e. Explorer shows

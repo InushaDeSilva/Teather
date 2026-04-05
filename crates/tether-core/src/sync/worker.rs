@@ -293,7 +293,7 @@ async fn process_download(
         .await?;
     }
 
-    try_mark_downloaded_in_sync(&task.local_path);
+    try_mark_downloaded_in_sync(&task.local_path, item_id);
     info!("Finished downloading item {}", item_id);
     Ok(())
 }
@@ -322,12 +322,32 @@ async fn process_upload_existing(
         .get_item_with_parent_folder(token, project_id, item_id)
         .await?;
     let versions = data_mgmt.get_item_versions(token, project_id, item_id).await?;
-    let remote_head_id = versions
+    let active_version = versions
         .first()
-        .map(|v| v.id.clone())
         .ok_or_else(|| anyhow::anyhow!("No remote versions for item {}", item_id))?;
+    let remote_head_id = active_version.id.clone();
+    let cloud_modified = active_version
+        .attributes
+        .last_modified_time
+        .as_deref()
+        .and_then(parse_cloud_time);
 
-    if let Some((sr_id, rel, _)) = stale_conflict_details(task, db, &remote_head_id, None)? {
+    let local_newer = std::fs::metadata(&task.local_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|lm| cloud_modified.map(|ct| lm > ct).unwrap_or(true))
+        .unwrap_or(true);
+
+    if !local_newer {
+        info!(
+            "Skipping upload for {}; local file is not newer than cloud (opened but unchanged)",
+            task.local_path.display()
+        );
+        try_mark_downloaded_in_sync(&task.local_path, item_id);
+        return Ok(());
+    }
+
+    if let Some((sr_id, rel, _)) = stale_conflict_details(task, db, &remote_head_id, cloud_modified)? {
         stage_conflict_prompt(
             db,
             &sr_id,
@@ -376,7 +396,7 @@ async fn process_upload_existing(
         .await?;
     }
 
-    try_mark_downloaded_in_sync(&task.local_path);
+    try_mark_downloaded_in_sync(&task.local_path, item_id);
     info!("Upload finished for {}", task.local_path.display());
     Ok(())
 }
@@ -475,7 +495,7 @@ async fn process_create_remote_file(
         &task.local_path,
     )
     .await?;
-    try_mark_downloaded_in_sync(&task.local_path);
+    try_mark_downloaded_in_sync(&task.local_path, &item_id);
     Ok(())
 }
 
@@ -763,8 +783,8 @@ fn fail_journal(db: &Arc<Mutex<SyncDatabase>>, task: &SyncTask, error_text: &str
 }
 
 /// Clear Explorer "Sync pending" after we wrote cloud bytes (best-effort).
-fn try_mark_downloaded_in_sync(path: &Path) {
-    if let Err(e) = tether_cfapi::mark_placeholder_in_sync(path) {
+fn try_mark_downloaded_in_sync(path: &Path, cloud_item_id: &str) {
+    if let Err(e) = tether_cfapi::mark_placeholder_in_sync(path, cloud_item_id) {
         warn!(
             "mark_placeholder_in_sync failed for {}: {e:#}",
             path.display()
