@@ -148,7 +148,7 @@ async fn reconcile_event_paths(
             }
 
             if row.cloud_item_id.is_none() {
-                if tether_cfapi::is_placeholder(&path) {
+                if tether_cfapi::is_placeholder(&path) && !is_old_versions_archive_path(Path::new(&rel)) {
                     continue;
                 }
                 tracing::info!("Detected new local file for remote create: {}", rel);
@@ -191,35 +191,62 @@ async fn reconcile_event_paths(
             // Only probe filesystem metadata for files that are NOT online-only.
             // For online-only entries the DB mtime is authoritative — reading
             // std::fs::metadata() would trigger hydration via CreateFileW.
-            let local_modified = if row.hydration_state == "online_only" {
-                row.last_local_modified.clone()
+            let metadata_result = if row.hydration_state == "online_only" {
+                Ok(None) // We don't probe online-only, so assume unchanged metadata
             } else {
-                std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(system_time_to_rfc3339)
+                std::fs::metadata(&path).map(Some)
             };
-            let changed_since_last =
-                local_modified.as_deref() != row.last_local_modified.as_deref();
-            if prioritized_live_paths.contains(&rel) || changed_since_last || sync_pending {
-                tracing::info!(
-                    "Detected local change for {} (changed_since_last={}, sync_pending={})",
-                    rel,
-                    changed_since_last,
-                    sync_pending
-                );
-                queue_or_journal(
-                    sync_root,
-                    db,
-                    queue,
-                    sync_root_id,
-                    &rel,
-                    SyncOperation::Upload,
-                    row.cloud_item_id.clone(),
-                    online,
-                    &pending_keys,
-                )
-                .await?;
+
+            match metadata_result {
+                Err(_) => {
+                    // File no longer exists, enqueue a delete cloud
+                    tracing::info!("Detected local file deletion for {}", rel);
+                    queue_or_journal(
+                        sync_root,
+                        db,
+                        queue,
+                        sync_root_id,
+                        &rel,
+                        SyncOperation::DeleteCloud,
+                        row.cloud_item_id.clone(),
+                        online,
+                        &pending_keys,
+                    )
+                    .await?;
+                }
+                Ok(fs_metadata) => {
+                    let local_modified = if row.hydration_state == "online_only" {
+                        row.last_local_modified.clone()
+                    } else {
+                        fs_metadata
+                            .and_then(|m| m.modified().ok())
+                            .map(system_time_to_rfc3339)
+                    };
+                    
+                    let changed_since_last =
+                        local_modified.as_deref() != row.last_local_modified.as_deref();
+                    
+                    if prioritized_live_paths.contains(&rel) || changed_since_last || sync_pending {
+                        tracing::info!(
+                            "Detected local change for {} (changed_since_last={}, sync_pending={})",
+                            rel,
+                            changed_since_last,
+                            sync_pending
+                        );
+                        queue_or_journal(
+                            sync_root,
+                            db,
+                            queue,
+                            sync_root_id,
+                            &rel,
+                            SyncOperation::Upload,
+                            row.cloud_item_id.clone(),
+                            online,
+                            &pending_keys,
+                        )
+                        .await?;
+                    }
+                }
             }
             continue;
         }
@@ -264,7 +291,7 @@ async fn reconcile_event_paths(
             continue;
         }
 
-        if tether_cfapi::is_placeholder(&path) {
+        if tether_cfapi::is_placeholder(&path) && !is_old_versions_archive_path(Path::new(&rel)) {
             continue;
         }
         tracing::info!("Detected new local file for remote create: {}", rel);
@@ -436,7 +463,8 @@ pub async fn reconcile_local_state(
         }
         match known_by_rel.get(file_rel) {
             None => {
-                if tether_cfapi::is_placeholder(&full) {
+                let full_path = sync_root.join(file_rel.replace('/', "\\"));
+                if tether_cfapi::is_placeholder(&full_path) && !is_old_versions_archive_path(Path::new(file_rel)) {
                     continue;
                 }
                 queue_or_journal(

@@ -449,6 +449,20 @@ impl SyncFilter for TetherSyncFilter {
             .strip_prefix(&self.root_path)
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|_| PathBuf::new());
+            
+        // If the file is moved outside the sync root (e.g. to the Recycle Bin), it's a deletion.
+        if !target.starts_with(&self.root_path) {
+            tracing::info!(
+                "rename: target {} is outside sync root, treating as a delete of {}",
+                target.display(),
+                source_path.display()
+            );
+            return ticket.pass().map_err(|e| {
+                tracing::error!("ticket.pass rename to outside sync root: {:?}", e);
+                CloudErrorKind::InvalidRequest
+            });
+        }
+        
         let relative_new = target
             .strip_prefix(&self.root_path)
             .map(|p| p.to_path_buf())
