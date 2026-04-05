@@ -140,40 +140,14 @@ async fn reconcile_event_paths(
             continue;
         }
         let rel = relative_under_root(sync_root, &path);
-        if path.is_dir() {
-            if rel.is_empty() {
+        let known_row = known_by_rel.get(&rel);
+
+        if let Some(row) = known_row {
+            if row.is_directory {
                 continue;
             }
-            if !known_by_rel.contains_key(&rel) {
-                queue_or_journal(
-                    sync_root,
-                    db,
-                    queue,
-                    sync_root_id,
-                    &rel,
-                    SyncOperation::CreateRemoteFolder,
-                    None,
-                    online,
-                    &pending_keys,
-                )
-                .await?;
-            }
-            continue;
-        }
-        if !path.is_file() || tether_cfapi::is_cloud_only_placeholder(&path) {
-            continue;
-        }
-        if let Some((_, live_rel)) = deferred_archives.iter().find(|(archive_rel, _)| archive_rel == &rel) {
-            tracing::info!(
-                "Deferring archive sync for {} until live file {} settles",
-                rel,
-                live_rel
-            );
-            continue;
-        }
 
-        match known_by_rel.get(&rel) {
-            None => {
+            if row.cloud_item_id.is_none() {
                 if tether_cfapi::is_placeholder(&path) {
                     continue;
                 }
@@ -190,48 +164,112 @@ async fn reconcile_event_paths(
                     &pending_keys,
                 )
                 .await?;
+                continue;
             }
-            Some(row) if row.cloud_item_id.is_some() => {
-                let sync_pending = tether_cfapi::is_sync_pending(&path);
-                if row.is_placeholder
-                    && row.hydration_state == "online_only"
-                    && !sync_pending
-                {
-                    tracing::debug!(
-                        "Ignoring placeholder hydration event for {} while local metadata settles",
-                        rel
-                    );
-                    continue;
-                }
-                let local_modified = std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(system_time_to_rfc3339);
-                let changed_since_last =
-                    local_modified.as_deref() != row.last_local_modified.as_deref();
-                if prioritized_live_paths.contains(&rel) || changed_since_last || sync_pending {
-                    tracing::info!(
-                        "Detected local change for {} (changed_since_last={}, sync_pending={})",
-                        rel,
-                        changed_since_last,
-                        sync_pending
-                    );
-                    queue_or_journal(
-                        sync_root,
-                        db,
-                        queue,
-                        sync_root_id,
-                        &rel,
-                        SyncOperation::Upload,
-                        row.cloud_item_id.clone(),
-                        online,
-                        &pending_keys,
-                    )
-                    .await?;
-                }
+
+            let sync_pending = tether_cfapi::is_sync_pending(&path);
+            if row.is_placeholder
+                && row.hydration_state == "online_only"
+                && !sync_pending
+            {
+                tracing::debug!(
+                    "Ignoring placeholder watcher event for {} while it remains online-only",
+                    rel
+                );
+                continue;
             }
-            _ => {}
+
+            if let Some((_, live_rel)) = deferred_archives.iter().find(|(archive_rel, _)| archive_rel == &rel) {
+                tracing::info!(
+                    "Deferring archive sync for {} until live file {} settles",
+                    rel,
+                    live_rel
+                );
+                continue;
+            }
+
+            let local_modified = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(system_time_to_rfc3339);
+            let changed_since_last =
+                local_modified.as_deref() != row.last_local_modified.as_deref();
+            if prioritized_live_paths.contains(&rel) || changed_since_last || sync_pending {
+                tracing::info!(
+                    "Detected local change for {} (changed_since_last={}, sync_pending={})",
+                    rel,
+                    changed_since_last,
+                    sync_pending
+                );
+                queue_or_journal(
+                    sync_root,
+                    db,
+                    queue,
+                    sync_root_id,
+                    &rel,
+                    SyncOperation::Upload,
+                    row.cloud_item_id.clone(),
+                    online,
+                    &pending_keys,
+                )
+                .await?;
+            }
+            continue;
         }
+
+        if tether_cfapi::is_cloud_only_placeholder(&path) {
+            tracing::debug!(
+                "Ignoring watcher event for cloud-only placeholder {}",
+                rel
+            );
+            continue;
+        }
+        if path.is_dir() {
+            if rel.is_empty() {
+                continue;
+            }
+            queue_or_journal(
+                sync_root,
+                db,
+                queue,
+                sync_root_id,
+                &rel,
+                SyncOperation::CreateRemoteFolder,
+                None,
+                online,
+                &pending_keys,
+            )
+            .await?;
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        if let Some((_, live_rel)) = deferred_archives.iter().find(|(archive_rel, _)| archive_rel == &rel) {
+            tracing::info!(
+                "Deferring archive sync for {} until live file {} settles",
+                rel,
+                live_rel
+            );
+            continue;
+        }
+
+        if tether_cfapi::is_placeholder(&path) {
+            continue;
+        }
+        tracing::info!("Detected new local file for remote create: {}", rel);
+        queue_or_journal(
+            sync_root,
+            db,
+            queue,
+            sync_root_id,
+            &rel,
+            SyncOperation::CreateRemoteFile,
+            None,
+            online,
+            &pending_keys,
+        )
+        .await?;
     }
 
     Ok(())
@@ -473,6 +511,17 @@ async fn queue_or_journal(
     }
 
     let local_path = sync_root.join(relative_path.replace('/', "\\"));
+    if matches!(operation, SyncOperation::Upload | SyncOperation::CreateRemoteFile)
+        && tether_cfapi::is_cloud_only_placeholder(&local_path)
+    {
+        tracing::debug!(
+            "Skipping {} for cloud-only placeholder {}",
+            op_key,
+            local_path.display()
+        );
+        return Ok(());
+    }
+
     if online {
         let mut task = SyncTask::new(operation, SyncPriority::High, local_path);
         task.cloud_item_id = cloud_item_id;
@@ -514,11 +563,14 @@ fn collect_paths(
         if should_exclude(&path) {
             continue;
         }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let rel = relative_under_root(root, &path);
-        if path.is_dir() {
+        if file_type.is_dir() {
             dirs.push(rel.clone());
             collect_paths(root, &path, dirs, files)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             if tether_cfapi::is_cloud_only_placeholder(&path) {
                 continue;
             }

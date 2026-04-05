@@ -306,6 +306,14 @@ async fn process_upload_existing(
     db: &Arc<Mutex<SyncDatabase>>,
     project_id: &str,
 ) -> anyhow::Result<()> {
+    if tether_cfapi::is_cloud_only_placeholder(&task.local_path) {
+        info!(
+            "Skipping upload for cloud-only placeholder {}",
+            task.local_path.display()
+        );
+        return Ok(());
+    }
+
     let item_id = task
         .cloud_item_id
         .as_ref()
@@ -381,6 +389,14 @@ async fn process_create_remote_file(
     db: &Arc<Mutex<SyncDatabase>>,
     project_id: &str,
 ) -> anyhow::Result<()> {
+    if tether_cfapi::is_cloud_only_placeholder(&task.local_path) {
+        info!(
+            "Skipping remote create for cloud-only placeholder {}",
+            task.local_path.display()
+        );
+        return Ok(());
+    }
+
     let sync_root_id = task
         .sync_root_id
         .as_ref()

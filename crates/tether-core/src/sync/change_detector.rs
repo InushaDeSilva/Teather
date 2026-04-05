@@ -46,11 +46,18 @@ pub fn should_exclude(path: &Path) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
+    let lower = name.to_ascii_lowercase();
 
     for pattern in EXCLUDED_PATTERNS {
         if name.starts_with(pattern) || name.ends_with(pattern) {
             return true;
         }
+    }
+
+    // Inventor can emit transient save artifacts like `Part.newVer.iam` during save flows.
+    // They are local intermediates and must never be treated as real sync candidates.
+    if lower.contains(".newver.") {
+        return true;
     }
 
     // Exclude hidden files (starting with .)
@@ -59,4 +66,17 @@ pub fn should_exclude(path: &Path) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_exclude;
+    use std::path::Path;
+
+    #[test]
+    fn excludes_inventor_newver_artifacts() {
+        assert!(should_exclude(Path::new("Setup3.newVer.iam")));
+        assert!(should_exclude(Path::new("Bracket.newver.ipt")));
+        assert!(!should_exclude(Path::new("Setup3.iam")));
+    }
 }

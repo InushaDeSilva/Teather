@@ -6,11 +6,25 @@ use cloud_filter::metadata::{Metadata, MetadataExt};
 use cloud_filter::placeholder::Placeholder;
 use cloud_filter::placeholder_file::PlaceholderFile;
 use cloud_filter::utility::WriteAt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 
 use crate::provider::{CloudFileInfo, CloudProvider};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HydrationCallerPolicy {
+    Allow,
+    Block,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HydrationDecision {
+    policy: HydrationCallerPolicy,
+    process_name: String,
+    process_path: Option<String>,
+    managed_extension: Option<String>,
+}
 
 fn is_old_versions_archive_path(path: &std::path::Path) -> bool {
     path.components().any(|component| {
@@ -74,6 +88,70 @@ fn placeholder_metadata(item: &CloudFileInfo) -> Metadata {
     }
 
     metadata
+}
+
+fn managed_cad_extension(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "iam" | "ipt" | "ipn" | "idw" | "ipj" | "dwg" | "dxf" | "step" | "stp"
+    )
+    .then_some(ext)
+}
+
+fn normalize_process_name_from_path(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase())
+}
+
+fn normalize_process_name(request: &Request) -> (String, Option<String>) {
+    let process = request.process();
+    let process_path = process.path().map(|p| p.to_string_lossy().into_owned());
+    let process_name = process
+        .path()
+        .as_deref()
+        .and_then(normalize_process_name_from_path)
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            let name = process.name().to_string_lossy().trim().to_ascii_lowercase();
+            (!name.is_empty()).then_some(name)
+        })
+        .unwrap_or_else(|| "unknown".into());
+
+    (process_name, process_path)
+}
+
+fn classify_hydration_request_for(
+    process_name: &str,
+    process_path: Option<String>,
+    full_path: &Path,
+) -> HydrationDecision {
+    let managed_extension = managed_cad_extension(full_path);
+    let policy = match managed_extension.as_deref() {
+        None => HydrationCallerPolicy::Allow,
+        Some(_) => match process_name {
+            "inventor.exe" | "inventorcoreconsole.exe" => HydrationCallerPolicy::Allow,
+            "explorer.exe"
+            | "dllhost.exe"
+            | "prevhost.exe"
+            | "searchindexer.exe"
+            | "searchprotocolhost.exe" => HydrationCallerPolicy::Block,
+            _ => HydrationCallerPolicy::Block,
+        },
+    };
+
+    HydrationDecision {
+        policy,
+        process_name: process_name.to_string(),
+        process_path,
+        managed_extension,
+    }
+}
+
+fn classify_hydration_request(request: &Request, full_path: &Path) -> HydrationDecision {
+    let (process_name, process_path) = normalize_process_name(request);
+    classify_hydration_request_for(&process_name, process_path, full_path)
 }
 
 impl SyncFilter for TetherSyncFilter {
@@ -188,6 +266,23 @@ impl SyncFilter for TetherSyncFilter {
         let cloud_item_id = std::str::from_utf8(blob).unwrap_or("").to_string();
 
         let full_path = request.path();
+        let required_range = info.required_file_range();
+        let decision = classify_hydration_request(&request, &full_path);
+
+        if matches!(decision.policy, HydrationCallerPolicy::Block) {
+            tracing::info!(
+                "fetch_data policy: action=would_block process={} process_path={} target={} range={}..{} extension={}",
+                decision.process_name,
+                decision.process_path.as_deref().unwrap_or("unknown"),
+                full_path.display(),
+                required_range.start,
+                required_range.end,
+                decision.managed_extension.as_deref().unwrap_or("n/a"),
+            );
+            // The current `cloud-filter` crate panics when the fetch-data callback fails certain
+            // transfers. Keep this policy as audit-only until we can block safely without taking
+            // down the provider process.
+        }
 
         if cloud_item_id.is_empty() {
             tracing::error!(
@@ -198,7 +293,6 @@ impl SyncFilter for TetherSyncFilter {
         }
 
         let file_size = request.file_size();
-        let required_range = info.required_file_range();
 
         tracing::info!(
             "fetch_data: item={}, logical_size={}, required_range={}..{}",
@@ -484,5 +578,61 @@ impl SyncFilter for TetherSyncFilter {
         {
             tracing::warn!("closed: upload queue failed: {e:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify_hydration_request_for, managed_cad_extension, HydrationCallerPolicy,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn managed_extensions_are_detected_case_insensitively() {
+        assert_eq!(
+            managed_cad_extension(Path::new("Setup3.IAM")).as_deref(),
+            Some("iam")
+        );
+        assert_eq!(
+            managed_cad_extension(Path::new("part.step")).as_deref(),
+            Some("step")
+        );
+        assert_eq!(managed_cad_extension(Path::new("notes.txt")), None);
+    }
+
+    #[test]
+    fn explorer_is_blocked_for_managed_files() {
+        let decision = classify_hydration_request_for(
+            "explorer.exe",
+            Some(String::from(r"C:\Windows\explorer.exe")),
+            Path::new(r"C:\Sync\CAE\Setup3.iam"),
+        );
+        assert_eq!(decision.policy, HydrationCallerPolicy::Block);
+        assert_eq!(decision.managed_extension.as_deref(), Some("iam"));
+    }
+
+    #[test]
+    fn inventor_is_allowed_for_managed_files() {
+        let decision = classify_hydration_request_for(
+            "inventor.exe",
+            Some(String::from(
+                r"C:\Program Files\Autodesk\Inventor\Bin\Inventor.exe",
+            )),
+            Path::new(r"C:\Sync\CAE\Setup3.iam"),
+        );
+        assert_eq!(decision.policy, HydrationCallerPolicy::Allow);
+        assert_eq!(decision.managed_extension.as_deref(), Some("iam"));
+    }
+
+    #[test]
+    fn non_managed_files_remain_allowed() {
+        let decision = classify_hydration_request_for(
+            "explorer.exe",
+            Some(String::from(r"C:\Windows\explorer.exe")),
+            Path::new(r"C:\Sync\CAE\readme.txt"),
+        );
+        assert_eq!(decision.policy, HydrationCallerPolicy::Allow);
+        assert_eq!(decision.managed_extension, None);
     }
 }
