@@ -337,6 +337,37 @@ impl SyncEngine {
             save_patterns.clone(),
         )?);
 
+        // Remove orphaned placeholder dirs — top-level dirs in the sync root
+        // that are no longer in the synced_folders list (e.g. the user removed
+        // a project).  Only delete CFAPI placeholder dirs; leave anything else.
+        let enabled_names: std::collections::HashSet<String> = self
+            .settings
+            .synced_folders
+            .iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.display_name.clone())
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(&sync_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !tether_cfapi::is_dir_no_recall(&path) {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !enabled_names.contains(&name) {
+                    if let Err(e) = std::fs::remove_dir_all(&path) {
+                        tracing::warn!("Could not remove orphaned dir {:?}: {e}", path);
+                    } else {
+                        info!("Removed orphaned synced folder dir: {}", name);
+                    }
+                }
+            }
+        }
+
         // Pre-create each enabled synced folder as a proper CFAPI placeholder
         // directory so it is visible in Explorer immediately on every launch —
         // even before CFAPI lazily calls fetch_placeholders for the root.

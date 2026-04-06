@@ -317,8 +317,29 @@ pub async fn remove_synced_folder(
     folder_id: String,
 ) -> Result<(), String> {
     let mut engine = state.engine.lock().await;
+
+    // Find the folder config before removing so we can delete its local dir.
+    let display_name = engine
+        .settings
+        .synced_folders
+        .iter()
+        .find(|f| f.folder_id == folder_id)
+        .map(|f| f.display_name.clone());
+
     engine.settings.synced_folders.retain(|f| f.folder_id != folder_id);
     engine.settings.save().map_err(|e| format!("{e:#}"))?;
+
+    // Delete the placeholder directory from the filesystem so it disappears
+    // from Explorer immediately.
+    if let (Some(name), Some(sync_root)) = (display_name, &engine.sync_root_path) {
+        let dir = sync_root.join(&name);
+        if tether_cfapi::path_exists_no_recall(&dir) {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                tracing::warn!("Could not remove synced folder dir {:?}: {e}", dir);
+            }
+        }
+    }
+
     Ok(())
 }
 
