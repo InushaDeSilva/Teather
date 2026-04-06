@@ -521,6 +521,18 @@ async fn process_create_remote_folder(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("CreateRemoteFolder missing sync_root_path"))?;
     let rel = relative_under_root(sync_root, &task.local_path);
+
+    // Top-level folders under a unified drive are synced-folder roots managed
+    // by the engine — they already exist in the cloud and must never be
+    // "created" remotely.  Just ensure the local directory exists and move on.
+    if project_id == "unified" && !rel.contains('/') && !rel.is_empty() {
+        if !tether_cfapi::path_exists_no_recall(&task.local_path) {
+            std::fs::create_dir_all(&task.local_path)?;
+        }
+        debug!("Skipping remote folder creation for unified root folder: {}", rel);
+        return Ok(());
+    }
+
     ensure_remote_folder(token, data_mgmt, db, project_id, sync_root_id, &rel).await?;
     Ok(())
 }
@@ -715,9 +727,13 @@ async fn ensure_remote_folder(
             continue;
         }
 
-        if i == 0 {
-            // First segment MUST exist, because it is a synced folder root
-            anyhow::bail!("Cannot create items at the root of a unified Tether Drive space. The root is reserved for Synced Folders.");
+        if i == 0 && project_id == "unified" {
+            // First segment under unified root should be a synced-folder root.
+            // If it isn't in the DB yet, warn but try the cloud API anyway.
+            tracing::warn!(
+                "First path segment '{}' not found in DB for unified root — attempting cloud lookup",
+                segment
+            );
         }
 
         let folder_id = match data_mgmt

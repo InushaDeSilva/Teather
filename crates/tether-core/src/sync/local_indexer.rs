@@ -96,12 +96,12 @@ async fn reconcile_event_paths(
         return Ok(());
     }
 
-    let service_state = {
+    let (service_state, is_unified) = {
         let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         let root = guard
             .get_sync_root(sync_root_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing sync root {}", sync_root_id))?;
-        ServiceState::from_db(&root.service_state)
+        (ServiceState::from_db(&root.service_state), root.project_id == "unified")
     };
     let online = matches!(service_state, ServiceState::Running | ServiceState::Reconnecting);
     let db_rows = {
@@ -141,7 +141,7 @@ async fn reconcile_event_paths(
         }
         let rel = relative_under_root(sync_root, &path);
         
-        if sync_root_id == "unified" && !rel.contains('/') && !rel.is_empty() {
+        if is_unified && !rel.contains('/') && !rel.is_empty() {
             // Cannot create, upload, or delete depth-1 unified folders natively.
             continue;
         }
@@ -335,6 +335,24 @@ pub async fn replay_operation_journal(
             continue;
         };
         let payload: OfflineJournalPayload = serde_json::from_str(payload_json)?;
+
+        // Skip stale depth-1 create_folder entries for unified roots
+        let is_unified_replay = {
+            let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+            guard.get_sync_root(sync_root_id)?
+                .map(|r| r.project_id == "unified")
+                .unwrap_or(false)
+        };
+        if is_unified_replay
+            && payload.operation == "create_folder"
+            && !payload.relative_path.contains('/')
+            && !payload.relative_path.is_empty()
+        {
+            let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
+            let _ = guard.update_operation_journal_status(&row.id, "done", None, None);
+            continue;
+        }
+
         let local_path = sync_root.join(payload.relative_path.replace('/', "\\"));
         let mut task = SyncTask::new(
             match payload.operation.as_str() {
@@ -372,12 +390,12 @@ pub async fn reconcile_local_state(
     sync_root_id: &str,
     save_patterns: &Arc<Mutex<SavePatternCoalescer>>,
 ) -> Result<()> {
-    let service_state = {
+    let (service_state, is_unified) = {
         let guard = db.lock().map_err(|e| anyhow::anyhow!("db lock: {e}"))?;
         let root = guard
             .get_sync_root(sync_root_id)?
             .ok_or_else(|| anyhow::anyhow!("Missing sync root {}", sync_root_id))?;
-        ServiceState::from_db(&root.service_state)
+        (ServiceState::from_db(&root.service_state), root.project_id == "unified")
     };
 
     let online = matches!(service_state, ServiceState::Running | ServiceState::Reconnecting);
@@ -425,7 +443,7 @@ pub async fn reconcile_local_state(
         if dir_rel.is_empty() {
             continue;
         }
-        if sync_root_id == "unified" && !dir_rel.contains('/') {
+        if is_unified && !dir_rel.contains('/') {
             continue;
         }
         if !known_by_rel.contains_key(dir_rel) {
@@ -445,7 +463,7 @@ pub async fn reconcile_local_state(
     }
 
     for file_rel in &local_files {
-        if sync_root_id == "unified" && !file_rel.contains('/') {
+        if is_unified && !file_rel.contains('/') {
             continue;
         }
         if let Some((_, live_rel)) = deferred_archives
