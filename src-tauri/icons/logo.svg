@@ -1,0 +1,19 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Dark rounded background -->
+  <rect width="512" height="512" rx="96" fill="#1e1e1e"/>
+
+  <!-- Left terminal node -->
+  <circle cx="136" cy="192" r="52" fill="#d95c2e"/>
+  <!-- Right terminal node -->
+  <circle cx="376" cy="192" r="52" fill="#d95c2e"/>
+  <!-- Crossbar connecting the two nodes -->
+  <rect x="136" y="164" width="240" height="56" fill="#d95c2e"/>
+
+  <!-- Vertical stem -->
+  <rect x="228" y="192" width="56" height="148" rx="28" fill="#d95c2e"/>
+  <!-- Bottom terminal node (slightly lighter — gradient illusion) -->
+  <circle cx="256" cy="368" r="52" fill="#eb6b3b"/>
+
+  <!-- Subtle inner highlight on bottom node -->
+  <circle cx="256" cy="356" r="28" fill="#f07c4a" opacity="0.35"/>
+</svg>

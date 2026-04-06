@@ -65,13 +65,11 @@ body {
     width: 24px;
     height: 24px;
     background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-    border-radius: 4px;
+    border-radius: 5px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-weight: bold;
-    font-size: 14px;
-    color: white;
+    flex-shrink: 0;
 }
 
 .logo h1 {
