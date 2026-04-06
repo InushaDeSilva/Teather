@@ -337,16 +337,23 @@ impl SyncEngine {
             save_patterns.clone(),
         )?);
 
-        // Pre-create each enabled synced folder as a plain directory so the
-        // folders are visible in Explorer immediately on every launch — even
-        // before CFAPI lazily calls fetch_placeholders for the root.
+        // Pre-create each enabled synced folder as a proper CFAPI placeholder
+        // directory so it is visible in Explorer immediately on every launch —
+        // even before CFAPI lazily calls fetch_placeholders for the root.
+        // This MUST use the CFAPI placeholder API (not std::fs::create_dir_all)
+        // so Windows knows to call fetch_placeholders when the user navigates in.
         for folder in &self.settings.synced_folders {
             if folder.enabled {
-                let dir = sync_root.join(&folder.display_name);
-                if !dir.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&dir) {
-                        tracing::warn!("Could not pre-create synced folder dir {:?}: {e}", dir);
-                    }
+                let cloud_id = format!("{}|{}", folder.project_id, folder.folder_id);
+                if let Err(e) = tether_cfapi::create_placeholder_dir(
+                    &sync_root,
+                    &folder.display_name,
+                    &cloud_id,
+                ) {
+                    tracing::warn!(
+                        "Could not create placeholder dir for '{}': {e}",
+                        folder.display_name
+                    );
                 }
             }
         }

@@ -94,12 +94,17 @@
         async function proceedToSync() {
             const ls = document.getElementById('login-status');
             try {
-                ls.textContent = 'Discovering folders...';
+                // Only auto-discover if there are no saved synced folders.
+                // This preserves manual additions/removals across restarts.
                 if (!discoveryComplete) {
-                   await invoke('auto_discover_drive_folders');
-                   discoveryComplete = true;
+                    const saved = await invoke('get_synced_folders');
+                    if (!saved || saved.length === 0) {
+                        ls.textContent = 'Discovering folders...';
+                        await invoke('auto_discover_drive_folders');
+                    }
+                    discoveryComplete = true;
                 }
-                
+
                 ls.textContent = 'Starting sync engine...';
                 await invoke('start_unified_sync');
                 

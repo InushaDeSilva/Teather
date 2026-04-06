@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(cargo check:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(taskkill /F /IM tether-app.exe)",
+      "Bash(powershell -Command \"Stop-Process -Name 'tether-app' -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1\")"
     ]
   }
 }
