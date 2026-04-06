@@ -19,7 +19,14 @@ The app leverages the **Windows Cloud Files API (CFAPI)** via our custom `tether
 - **CAD Save-Patterns (Wired & Working)**: Inventor save patterns (e.g., write `.new`, delete original, rename) are coalesced by `save_patterns.rs` to push a cohesive remote API version update without breaking history.
 - **Conflict Management & Gating (Wired & Working)**: Enforced via `conflict.rs`. A local hash and a `base_remote_version_id` are maintained. The upload pipeline (`worker.rs`) refuses to overwrite a remote file if the remote version advanced ahead of the local file's origin copy, invoking a "Keep Both" collision handling logic.
 
-### 2.3 UI & Routing
+### 2.3 Unified Mount Architecture
+- **Single CFAPI Sync Root (Wired & Working)**: All Autodesk Drive projects are mounted under one unified CFAPI sync root at `%LOCALAPPDATA%\Tether\Drive`. Each enabled project appears as a top-level placeholder directory. This mirrors Autodesk Desktop Connector behavior instead of creating a separate mount point per project.
+- **Auto-Discovery & Persistence (Wired & Working)**: On first launch, `auto_discover_drive_folders` enumerates all accessible project folders across non-personal hubs and saves them to `settings.json`. Subsequent launches restore from saved settings without re-discovery, preserving manual additions and removals.
+- **Auto-Start on Boot (Wired & Working)**: The sync engine starts automatically on app launch if saved settings contain synced folders and a valid token. No user interaction required on subsequent launches.
+- **Project Add/Remove (Wired & Working)**: Projects can be added by pasting an Autodesk Drive folder link. Removing a project immediately deletes its placeholder directory from disk. Orphaned directories (from projects removed while offline) are cleaned up on the next startup.
+- **Fusion 360 Hub Filtering (Wired & Working)**: Personal hubs (`hubs:autodesk.a360:PersonalHub`) are filtered out during discovery. Only business/team hubs (`hubs:autodesk.core:Hub`) such as ACC and BIM360 are synced.
+
+### 2.4 UI & Routing
 - **Tauri Application Interface (Wired & Working)**: The frontend compiles into a lightweight system tray providing real-time Sync Status, OAuth PKCE login pipelines (`auth.rs`), an interior Database trouble-shooter panel, and bundled diagnostic `.zip` export generators (`diagnostics.rs`).
 - **Explorer Shell Context Menus (Stubs Only - NOT WIRED NATIVELY)**: Natively right-clicking inside Windows Explorer to `Sync Now`, `Free Up Space`, or `View Online` is fundamentally **missing** for end-users. The API logic streams exist programmatically, but MSIX manifest stubs and deep Windows 11 shell integrations are pending.
 
@@ -34,6 +41,11 @@ The app leverages the **Windows Cloud Files API (CFAPI)** via our custom `tether
 
 ## 4. Parity Backlog: Missing Desktop Connector Behaviors (TODO)
 *(This formal checklist maps critical missing pieces required to mimic x64 official behaviors)*
+
+### 4.0 Known Limitations (Current Build)
+- **File deletion from Autodesk Cloud only via Web UI**: Autodesk APS blocks deletion on personal hubs (see §3). Business hub deletion works via `versions:autodesk.core:Deleted` payload.
+- **Explorer shell context menus require MSIX packaging**: Right-click `Sync Now`, `Free Up Space`, `View Online` are in the backend but not wired to Windows shell — requires sparse manifest registration (Windows 11 only, separate workstream).
+- **No native conflict/delete toast notifications yet**: Conflict resolution and delete confirmations are handled inside the Tether UI panel. Native Windows toast notifications with action buttons are designed but not yet wired.
 
 ### 4.1 Missing Explorer Semantics & Locking
 - **Full Shell Context Pipeline**: Currently, tray/menu routing is decoupled. Wire the Context menu stubs fully natively via Windows 11 shell implementation standards (to expose `Free Up Space`, `Copy Link`, etc., on right click).
