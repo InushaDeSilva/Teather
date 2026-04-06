@@ -728,10 +728,13 @@ async fn ensure_remote_folder(
         }
 
         if i == 0 && project_id == "unified" {
-            // First segment under unified root should be a synced-folder root.
-            // If it isn't in the DB yet, warn but try the cloud API anyway.
-            tracing::warn!(
-                "First path segment '{}' not found in DB for unified root — attempting cloud lookup",
+            // The first path segment under a unified drive MUST be a synced-folder
+            // root registered by list_folder_contents("").  If it's not in the DB
+            // yet it means CFAPI hasn't populated the root listing yet — bail so
+            // the task retries (with backoff) instead of calling the APS API with
+            // the dummy "unified" project/folder IDs which would always fail.
+            anyhow::bail!(
+                "Synced folder root '{}' not yet in DB — will retry after CFAPI root listing",
                 segment
             );
         }

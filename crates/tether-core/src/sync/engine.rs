@@ -139,6 +139,12 @@ impl SyncEngine {
     }
 
     pub async fn start_unified(&mut self) -> Result<()> {
+        // Idempotent — if CFAPI is already connected, skip re-initialisation.
+        if self.sync_root_path.is_some() {
+            info!("Unified sync already running — skipping re-init");
+            return Ok(());
+        }
+
         info!("Starting unified sync for Autodesk Drive");
 
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
@@ -330,6 +336,20 @@ impl SyncEngine {
             sync_root_db_id.clone(),
             save_patterns.clone(),
         )?);
+
+        // Pre-create each enabled synced folder as a plain directory so the
+        // folders are visible in Explorer immediately on every launch — even
+        // before CFAPI lazily calls fetch_placeholders for the root.
+        for folder in &self.settings.synced_folders {
+            if folder.enabled {
+                let dir = sync_root.join(&folder.display_name);
+                if !dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(&dir) {
+                        tracing::warn!("Could not pre-create synced folder dir {:?}: {e}", dir);
+                    }
+                }
+            }
+        }
 
         self.set_service_state(ServiceState::Running).await?;
         local_indexer::reconcile_local_state(

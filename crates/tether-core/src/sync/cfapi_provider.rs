@@ -86,20 +86,49 @@ impl ApsCloudProvider {
 impl CloudProvider for ApsCloudProvider {
     fn list_folder_contents(&self, cloud_folder_id: &str) -> Result<Vec<CloudFileInfo>> {
         if cloud_folder_id.is_empty() {
-             let mut out = Vec::new();
-             for folder in &self.synced_folders {
-                 if folder.enabled {
-                     out.push(CloudFileInfo {
-                         name: folder.display_name.clone(),
-                         is_directory: true,
-                         size: 0,
-                         cloud_id: format!("{}|{}", folder.project_id, folder.folder_id),
-                         last_modified: None,
-                         created: None,
-                     });
-                 }
-             }
-             return Ok(out);
+            let mut out = Vec::new();
+            for folder in &self.synced_folders {
+                if folder.enabled {
+                    out.push(CloudFileInfo {
+                        name: folder.display_name.clone(),
+                        is_directory: true,
+                        size: 0,
+                        cloud_id: format!("{}|{}", folder.project_id, folder.folder_id),
+                        last_modified: None,
+                        created: None,
+                    });
+                }
+            }
+            // Persist synced folder root mappings to the DB so that
+            // ensure_remote_folder can resolve the first path segment (e.g.
+            // "ProjectA") to its real project_id|folder_id without falling back
+            // to the APS API with the dummy "unified" identifiers.
+            if let (Some(db), Some(sync_root_id)) = (&self.state_db, &self.sync_root_id) {
+                if let Ok(db) = db.lock() {
+                    for folder in &self.synced_folders {
+                        if !folder.enabled {
+                            continue;
+                        }
+                        let rel = folder.display_name.clone();
+                        let cloud_id = format!("{}|{}", folder.project_id, folder.folder_id);
+                        let existing = db.get_file_entry_by_path(sync_root_id, &rel).ok().flatten();
+                        let mut row = existing.unwrap_or_else(|| {
+                            let mut r = FileEntryRow::default();
+                            r.id = Uuid::new_v4().to_string();
+                            r
+                        });
+                        row.sync_root_id = sync_root_id.clone();
+                        row.local_relative_path = rel;
+                        row.cloud_item_id = Some(cloud_id);
+                        row.is_directory = true;
+                        row.is_placeholder = true;
+                        row.sync_state = "in_sync".into();
+                        row.hydration_state = "directory".into();
+                        let _ = db.upsert_file_entry(&row);
+                    }
+                }
+            }
+            return Ok(out);
         }
 
         let token = self

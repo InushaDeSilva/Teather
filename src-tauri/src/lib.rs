@@ -92,6 +92,25 @@ pub fn run() {
             };
             dispatch_shell_args(shell_state, &startup_args);
             tray::setup_tray(app)?;
+
+            // Auto-start sync if saved settings already have synced folders and
+            // a valid token — no UI interaction needed on subsequent launches.
+            let engine_for_autostart = app.state::<AppState>().engine.clone();
+            async_runtime::spawn(async move {
+                let should_start = {
+                    let eng = engine_for_autostart.lock().await;
+                    !eng.settings.synced_folders.is_empty()
+                        && eng.auth.get_access_token().is_ok()
+                };
+                if should_start {
+                    let mut eng = engine_for_autostart.lock().await;
+                    match eng.start_unified().await {
+                        Ok(()) => tracing::info!("Auto-started unified sync from saved settings"),
+                        Err(e) => tracing::warn!("Auto-start unified sync failed: {e:#}"),
+                    }
+                }
+            });
+
             let handle = app.handle().clone();
             
             if let Some(window) = app.get_webview_window("main") {
