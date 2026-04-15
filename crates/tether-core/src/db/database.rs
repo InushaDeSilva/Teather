@@ -13,6 +13,8 @@ pub struct SyncDatabase {
 }
 
 impl SyncDatabase {
+    const FILE_ENTRY_PATH_MATCH: &'static str = "local_relative_path = ?2 COLLATE NOCASE";
+
     /// Open (or create) the database at the standard location.
     pub fn open_default() -> Result<Self> {
         let path = Self::default_path();
@@ -276,8 +278,9 @@ impl SyncDatabase {
         relative_path: &str,
     ) -> Result<Option<FileEntryRow>> {
         let sql = format!(
-            "{} FROM file_entries WHERE sync_root_id = ?1 AND local_relative_path = ?2",
-            Self::FILE_ENTRY_SELECT
+            "{} FROM file_entries WHERE sync_root_id = ?1 AND {}",
+            Self::FILE_ENTRY_SELECT,
+            Self::FILE_ENTRY_PATH_MATCH,
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(rusqlite::params![sync_root_id, relative_path], |row| {
@@ -322,7 +325,7 @@ impl SyncDatabase {
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE file_entries SET hydration_state = ?1, is_placeholder = ?2, hydration_reason = ?3
-             WHERE sync_root_id = ?4 AND local_relative_path = ?5",
+             WHERE sync_root_id = ?4 AND local_relative_path = ?5 COLLATE NOCASE",
             rusqlite::params![
                 hydration_state,
                 if is_placeholder { 1 } else { 0 },
@@ -353,7 +356,7 @@ impl SyncDatabase {
                  is_placeholder = ?4,
                  sync_state = ?5,
                  hydration_reason = ?6
-             WHERE sync_root_id = ?7 AND local_relative_path = ?8",
+             WHERE sync_root_id = ?7 AND local_relative_path = ?8 COLLATE NOCASE",
             rusqlite::params![
                 last_local_modified,
                 file_size,
@@ -377,7 +380,7 @@ impl SyncDatabase {
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE file_entries SET base_remote_version_id = ?1, base_remote_modified = ?2, cloud_version_id = ?1
-             WHERE sync_root_id = ?3 AND local_relative_path = ?4",
+             WHERE sync_root_id = ?3 AND local_relative_path = ?4 COLLATE NOCASE",
             rusqlite::params![version_id, cloud_modified, sync_root_id, relative_path],
         )?;
         Ok(())
@@ -388,7 +391,7 @@ impl SyncDatabase {
         self.conn.execute(
             "UPDATE file_entries SET pin_state = ?1,
                  hydration_state = CASE WHEN ?1 = 1 THEN 'hydrated_pinned' ELSE hydration_state END
-             WHERE sync_root_id = ?2 AND local_relative_path = ?3",
+             WHERE sync_root_id = ?2 AND local_relative_path = ?3 COLLATE NOCASE",
             rusqlite::params![pin, sync_root_id, relative_path],
         )?;
         Ok(())
@@ -396,7 +399,7 @@ impl SyncDatabase {
 
     pub fn remove_file_entry(&self, sync_root_id: &str, relative_path: &str) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM file_entries WHERE sync_root_id = ?1 AND local_relative_path = ?2",
+            "DELETE FROM file_entries WHERE sync_root_id = ?1 AND local_relative_path = ?2 COLLATE NOCASE",
             rusqlite::params![sync_root_id, relative_path],
         )?;
         Ok(())
@@ -411,7 +414,7 @@ impl SyncDatabase {
         self.conn.execute(
             "UPDATE file_entries
              SET local_relative_path = ?1
-             WHERE sync_root_id = ?2 AND local_relative_path = ?3",
+             WHERE sync_root_id = ?2 AND local_relative_path = ?3 COLLATE NOCASE",
             rusqlite::params![new_relative_path, sync_root_id, old_relative_path],
         )?;
         Ok(())
@@ -754,5 +757,49 @@ impl Default for FileEntryRow {
             base_remote_modified: None,
             hydration_reason: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileEntryRow, SyncDatabase};
+    use tempfile::tempdir;
+
+    #[test]
+    fn file_entry_path_queries_are_case_insensitive() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("state.db");
+        let db = SyncDatabase::open(&db_path).expect("open db");
+        let sync_root_id = db
+            .insert_sync_root("hub", "project", "folder", "C:/Sync", "Tether Drive")
+            .expect("insert sync root");
+
+        let mut row = FileEntryRow::default();
+        row.sync_root_id = sync_root_id.clone();
+        row.local_relative_path = "Horizon Drive/Launch Pad/Upper Boom.ipt".into();
+        row.cloud_item_id = Some("proj|item-1".into());
+        row.file_size = Some(123);
+        db.upsert_file_entry(&row).expect("upsert file entry");
+
+        let fetched = db
+            .get_file_entry_by_path(&sync_root_id, "horizon drive/launch pad/upper boom.ipt")
+            .expect("lookup by path")
+            .expect("entry exists");
+        assert_eq!(fetched.cloud_item_id.as_deref(), Some("proj|item-1"));
+
+        db.update_hydration_state(
+            &sync_root_id,
+            "HORIZON DRIVE/LAUNCH PAD/UPPER BOOM.IPT",
+            "hydrated_ephemeral",
+            false,
+            Some("opened"),
+        )
+        .expect("update hydration state");
+
+        let updated = db
+            .get_file_entry_by_path(&sync_root_id, "horizon drive/launch pad/upper boom.ipt")
+            .expect("lookup updated path")
+            .expect("updated entry exists");
+        assert_eq!(updated.hydration_state, "hydrated_ephemeral");
     }
 }

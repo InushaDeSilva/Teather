@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::api::auth::ApsAuthClient;
 use crate::api::data_management::ApsDataManagementClient;
+use crate::api::models::latest_version;
 use crate::api::storage::ApsStorageClient;
 use crate::db::database::{FileEntryRow, SyncDatabase};
 use crate::sync::conflict::{self, ConflictStrategy, StaleBaseOutcome};
@@ -185,8 +186,7 @@ async fn process_download(
 
     debug!("Fetching versions for item: {}", item_id);
     let versions = data_mgmt.get_item_versions(token, actual_project_id, real_item_id).await?;
-    let active_version = versions
-        .first()
+    let active_version = latest_version(&versions)
         .ok_or_else(|| anyhow::anyhow!("No versions found for item {}", item_id))?;
     let remote_head_id = active_version.id.clone();
     let cloud_modified = active_version
@@ -327,8 +327,7 @@ async fn process_upload_existing(
         .get_item_with_parent_folder(token, actual_project_id, real_item_id)
         .await?;
     let versions = data_mgmt.get_item_versions(token, actual_project_id, real_item_id).await?;
-    let active_version = versions
-        .first()
+    let active_version = latest_version(&versions)
         .ok_or_else(|| anyhow::anyhow!("No remote versions for item {}", item_id))?;
     let remote_head_id = active_version.id.clone();
     let cloud_modified = active_version
@@ -482,8 +481,7 @@ async fn process_create_remote_file(
             .create_item(token, actual_project_id, parent_folder_id, file_name, &loc.id)
             .await?;
         let versions = data_mgmt.get_item_versions(token, actual_project_id, &item.id).await?;
-        let active = versions
-            .first()
+        let active = latest_version(&versions)
             .ok_or_else(|| anyhow::anyhow!("Created item missing version"))?;
         (
             format!("{}|{}", actual_project_id, item.id),

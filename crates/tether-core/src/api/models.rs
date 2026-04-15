@@ -132,6 +132,21 @@ pub struct VersionInfo {
     pub relationships: Option<VersionRelationships>,
 }
 
+pub fn latest_version(versions: &[VersionInfo]) -> Option<&VersionInfo> {
+    versions.iter().max_by(|left, right| {
+        left.attributes
+            .version_number
+            .unwrap_or(i32::MIN)
+            .cmp(&right.attributes.version_number.unwrap_or(i32::MIN))
+            .then_with(|| {
+                left.attributes
+                    .last_modified_time
+                    .cmp(&right.attributes.last_modified_time)
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct VersionAttributes {
     #[serde(rename = "versionNumber")]
@@ -163,6 +178,36 @@ pub struct StorageMeta {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageMetaLink {
     pub href: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{latest_version, VersionAttributes, VersionInfo};
+
+    fn make_version(id: &str, version_number: Option<i32>, last_modified: Option<&str>) -> VersionInfo {
+        VersionInfo {
+            id: id.to_string(),
+            attributes: VersionAttributes {
+                version_number,
+                last_modified_time: last_modified.map(str::to_string),
+                name: None,
+                storage_size: None,
+            },
+            relationships: None,
+        }
+    }
+
+    #[test]
+    fn selects_highest_version_number_even_if_list_order_differs() {
+        let versions = vec![
+            make_version("v1", Some(1), Some("2026-04-15T04:00:00Z")),
+            make_version("v3", Some(3), Some("2026-04-15T06:00:00Z")),
+            make_version("v2", Some(2), Some("2026-04-15T05:00:00Z")),
+        ];
+
+        let latest = latest_version(&versions).expect("latest version");
+        assert_eq!(latest.id, "v3");
+    }
 }
 
 // ── Storage / S3 URLs ──

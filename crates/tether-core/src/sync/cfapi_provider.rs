@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::UnboundedSender;
 
 use anyhow::{Context, Result};
+use crate::api::models::latest_version;
 use tether_cfapi::{CloudFileInfo, CloudProvider};
 use tokio::runtime::Handle;
 use uuid::Uuid;
@@ -170,7 +171,7 @@ impl CloudProvider for ApsCloudProvider {
                     self.data_mgmt
                         .get_item_versions(&token, project_id, &item.id),
                 ) {
-                    if let Some(v) = versions.first() {
+                    if let Some(v) = latest_version(&versions) {
                         size = v.attributes.storage_size.unwrap_or(0);
                     }
                 }
@@ -241,9 +242,7 @@ impl CloudProvider for ApsCloudProvider {
                 .get_item_versions(&token, project_id, real_item_id),
         )?;
 
-        let active_version = versions
-            .first()
-            .context("No versions found for item")?;
+        let active_version = latest_version(&versions).context("No versions found for item")?;
 
         let storage_urn = active_version
             .relationships
@@ -341,8 +340,7 @@ impl CloudProvider for ApsCloudProvider {
             self.data_mgmt
                 .get_item_versions(&token, project_id, real_item_id),
         )?;
-        let vid = versions
-            .first()
+        let vid = latest_version(&versions)
             .map(|v| v.id.as_str())
             .context("No versions for item rename")?;
         self.runtime.block_on(self.data_mgmt.patch_version_name(
