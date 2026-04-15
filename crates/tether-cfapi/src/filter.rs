@@ -3,7 +3,7 @@
 use cloud_filter::error::CloudErrorKind;
 use cloud_filter::filter::{info, ticket, Request, SyncFilter};
 use cloud_filter::metadata::{Metadata, MetadataExt};
-use cloud_filter::placeholder::Placeholder;
+use cloud_filter::placeholder::{Placeholder, UpdateOptions};
 use cloud_filter::placeholder_file::PlaceholderFile;
 use cloud_filter::utility::WriteAt;
 use std::path::{Path, PathBuf};
@@ -88,6 +88,41 @@ fn placeholder_metadata(item: &CloudFileInfo) -> Metadata {
     }
 
     metadata
+}
+
+fn update_placeholder_logical_size(path: &Path, logical_size: u64) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map(Metadata::from)
+        .unwrap_or_else(|_| {
+            Metadata::file()
+                .size(logical_size)
+                .attributes(FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0)
+        })
+        .size(logical_size);
+
+    let mut placeholder = Placeholder::options()
+        .write_access()
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "CfOpenFileWithOplock(write_access) failed for {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+
+    placeholder
+        .update(UpdateOptions::default().metadata(metadata), None)
+        .map_err(|e| {
+            format!(
+                "CfUpdatePlaceholder failed for {} (new logical size {}): {}",
+                path.display(),
+                logical_size,
+                e
+            )
+        })?;
+
+    Ok(())
 }
 
 fn managed_cad_extension(path: &Path) -> Option<String> {
@@ -292,7 +327,7 @@ impl SyncFilter for TetherSyncFilter {
             return Err(CloudErrorKind::InvalidRequest);
         }
 
-        let file_size = request.file_size();
+        let mut file_size = request.file_size();
 
         tracing::info!(
             "fetch_data: item={}, logical_size={}, required_range={}..{}",
@@ -303,7 +338,7 @@ impl SyncFilter for TetherSyncFilter {
         );
 
         // Download the file content from cloud storage
-        let mut data = match self.provider.download_file_content(&cloud_item_id) {
+        let data = match self.provider.download_file_content(&cloud_item_id) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(
@@ -314,6 +349,23 @@ impl SyncFilter for TetherSyncFilter {
                 return Err(CloudErrorKind::NetworkUnavailable);
             }
         };
+
+        let downloaded_size = data.len() as u64;
+        if file_size != downloaded_size {
+            tracing::warn!(
+                "fetch_data: placeholder logical {} differs from downloaded {} bytes — updating placeholder metadata for {}",
+                file_size,
+                downloaded_size,
+                full_path.display()
+            );
+
+            update_placeholder_logical_size(&full_path, downloaded_size).map_err(|e| {
+                tracing::error!("fetch_data: {e}");
+                CloudErrorKind::InvalidRequest
+            })?;
+
+            file_size = downloaded_size;
+        }
 
         let fs = file_size as usize;
         if fs == 0 {
@@ -327,29 +379,8 @@ impl SyncFilter for TetherSyncFilter {
                 return Ok(());
             }
             tracing::error!(
-                "fetch_data: placeholder size is 0 but download is {} bytes — fix folder listing metadata for {}",
+                "fetch_data: placeholder size reconciled to 0 but downloaded payload is {} bytes for {}",
                 data.len(),
-                full_path.display()
-            );
-            return Err(CloudErrorKind::InvalidRequest);
-        }
-
-        // Placeholder logical size must match bytes we materialize. If APS metadata was smaller
-        // than the real OSS object, truncate; if larger, fail (would yield corrupt CAD files and
-        // errors like Inventor "The database in … could not be opened").
-        if data.len() > fs {
-            tracing::warn!(
-                "fetch_data: download {} bytes > placeholder logical {} — truncating for {}",
-                data.len(),
-                fs,
-                full_path.display()
-            );
-            data.truncate(fs);
-        } else if data.len() < fs {
-            tracing::error!(
-                "fetch_data: download {} bytes < placeholder logical {} — refusing corrupt hydration for {}",
-                data.len(),
-                fs,
                 full_path.display()
             );
             return Err(CloudErrorKind::InvalidRequest);
@@ -358,13 +389,13 @@ impl SyncFilter for TetherSyncFilter {
         let start = required_range.start as usize;
         let end = (required_range.end as usize).min(data.len());
         if start >= end {
-            tracing::error!(
-                "fetch_data: invalid required range {}..{} for {}",
+            tracing::warn!(
+                "fetch_data: request range {}..{} falls outside reconciled logical EOF {} for {} — writing full file payload anyway",
                 start,
-                end,
+                required_range.end,
+                file_size,
                 full_path.display()
             );
-            return Err(CloudErrorKind::InvalidRequest);
         }
 
         // We already downloaded the full file from OSS, so materialize the whole payload in one
