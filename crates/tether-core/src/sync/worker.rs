@@ -10,6 +10,7 @@ use crate::api::data_management::ApsDataManagementClient;
 use crate::api::storage::ApsStorageClient;
 use crate::db::database::{FileEntryRow, SyncDatabase};
 use crate::sync::conflict::{self, ConflictStrategy, StaleBaseOutcome};
+use crate::sync::change_detector::should_exclude;
 use crate::sync::hasher;
 use crate::sync::parity::{prompt_payload_json, PromptKind, PromptPayload};
 use crate::sync::queue::SyncQueue;
@@ -413,6 +414,14 @@ async fn process_create_remote_file(
     db: &Arc<Mutex<SyncDatabase>>,
     project_id: &str,
 ) -> anyhow::Result<()> {
+    if should_exclude(&task.local_path) {
+        info!(
+            "Skipping remote create for excluded local artifact {}",
+            task.local_path.display()
+        );
+        return Ok(());
+    }
+
     if tether_cfapi::is_cloud_only_attr(&task.local_path) {
         info!(
             "Skipping remote create for cloud-only placeholder {}",

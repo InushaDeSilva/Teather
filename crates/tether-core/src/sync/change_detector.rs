@@ -16,6 +16,18 @@ const EXCLUDED_PATTERNS: &[&str] = &[
     ".cloudforge", ".tether",
 ];
 
+fn is_inventor_sidecar_artifact(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let Some(stem) = lower.strip_suffix(".ini") else {
+        return false;
+    };
+    let Some(previous_ext) = stem.rsplit('.').next() else {
+        return false;
+    };
+
+    matches!(previous_ext, "iam" | "ipt" | "ipn" | "idw" | "ipj")
+}
+
 pub struct ChangeDetector {
     _debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap>,
 }
@@ -60,6 +72,12 @@ pub fn should_exclude(path: &Path) -> bool {
         return true;
     }
 
+    // Inventor also emits sidecar files such as `Project.ipj.ini` while opening and
+    // saving project contexts. They are local app artifacts, not sync candidates.
+    if is_inventor_sidecar_artifact(name) {
+        return true;
+    }
+
     // Exclude hidden files (starting with .)
     if name.starts_with('.') {
         return true;
@@ -78,5 +96,12 @@ mod tests {
         assert!(should_exclude(Path::new("Setup3.newVer.iam")));
         assert!(should_exclude(Path::new("Bracket.newver.ipt")));
         assert!(!should_exclude(Path::new("Setup3.iam")));
+    }
+
+    #[test]
+    fn excludes_inventor_ini_sidecars_without_excluding_plain_ini_files() {
+        assert!(should_exclude(Path::new("Horizon Drive.ipj.ini")));
+        assert!(should_exclude(Path::new("Assembly.iam.ini")));
+        assert!(!should_exclude(Path::new("settings.ini")));
     }
 }
